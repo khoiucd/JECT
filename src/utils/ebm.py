@@ -1,4 +1,5 @@
 import torch
+import random
 import numpy as np 
 
 
@@ -44,7 +45,8 @@ def sample_buffer(buffer, pos_data, n_classes=5, p=0.95):
     n_replay = (np.random.rand(batch_size) < p).sum()
 
     replay_sample, replay_id = buffer.get(n_replay)
-    random_sample = torch.rand(batch_size - n_replay, 3, 32, 32, device=device)
+    replay_sample, replay_id = replay_sample.to(device), replay_id.to(device)
+    random_sample = torch.rand(batch_size - n_replay, pos_data.size(1), device=device)
     random_id = torch.randint(0, n_classes, (batch_size - n_replay,), device=device)
 
     return (
@@ -69,7 +71,7 @@ def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20):
     data_shape = pos_data.shape
     batch_size = data_shape[0]
 
-    neg_data, neg_id = sample_buffer(replay_buffer, batch_size)
+    neg_data, neg_id = sample_buffer(replay_buffer, pos_data)
     neg_data.requires_grad = True 
 
     requires_grad(model.parameters(), False)
@@ -78,9 +80,9 @@ def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20):
     for k in range(sample_step):
         noise = torch.randn(pos_data.shape, device=pos_data.device)
         noise.normal_(0, 0.0005)
-        neg_data.add_(noise)
+        neg_data.data.add_(noise.data)
 
-        neg_energy = -1.0 * torch.logsumexp(model(neg_data))
+        neg_energy = -1.0 * torch.logsumexp(model(neg_data), 1)
         neg_energy.sum().backward()
         
         # TODO: update hyperparam

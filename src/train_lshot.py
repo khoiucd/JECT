@@ -30,7 +30,7 @@ from torch.optim.lr_scheduler import MultiStepLR, StepLR, CosineAnnealingLR
 
 from utils import configuration
 from lshot_update import bound_update
-from utils.ebm import SampleBuffer, sample_ebm
+from utils.ebm import SampleBuffer, sample_ebm, clip_grad
 
 best_prec1 = -1
 
@@ -307,7 +307,7 @@ def accuracy(output, target, topk=(1,)):
 
         res = []
         for k in topk:
-            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
@@ -524,7 +524,7 @@ def meta_evaluate(data, train_mean, shot):
     cl2n_list = []
     for _ in warp_tqdm(range(args.meta_test_iter)):
         train_data, test_data, train_label, test_label = sample_case(data, shot)
-        acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
+        acc = jem_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
                                 norm_type='CL2N')
         cl2n_list.append(acc)
         acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
@@ -594,6 +594,7 @@ def lshot_prediction(args, knn, lmd, X, unary, support_label, test_label):
     out = np.take(support_label, l)
     acc, _ = get_accuracy(test_label, out)
     return acc
+
 def jem_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
     # compute normalization
     if norm_type == 'CL2N':
@@ -625,46 +626,66 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
 
     feat_dim = gallery.shape[-1]
     n_classes = args.meta_val_way
+
+    # map global class to task class (i.e. 64 class to 5 class)
+    global2task = {}
+    idx = 0
+    for c in support_label:
+        if c in global2task.keys():
+            continue
+        global2task[c] = idx
+        idx += 1 
+
+    task2global = {v: k for k, v in global2task.items()}
+    support_label = [global2task[v] for v in support_label]
+    test_label = [global2task[v] for v in test_label]
+
+    # prepare for training linear
+    gallery = torch.tensor(gallery, device='cuda:0')
+    query = torch.tensor(query, device='cuda:0')
+    support_label = torch.tensor(support_label, device='cuda:0')
+    test_label = torch.tensor(test_label, device='cuda:0')
     # TODO: Bias or not
     fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
-
     # init fc weight = prototype 
     # FIXME: Current implementation is wrong, need to sort gallery in class id order
-    fc.weight = gallery.reshape(feat_dim, n_classes)
-
-    # optimizing
+    fc.weight.data = gallery.reshape(n_classes, feat_dim)
     ce_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
     replay_buffer = SampleBuffer()
-    pos_samples = torch.cat([gallery, query], dim=-1)
+    pos_samples = torch.cat([gallery, query], dim=0)
 
     # hyperparam
     n_steps = 100
     alpha = 1
     beta = 1
 
+    fc.train()
     for step in range(n_steps):
-        optimizer.zero_grad() 
-        
         # cross-entropy loss 
         predict = fc(gallery)
-        ce_loss = ce_criterion(predict, support_label)
+        # FIXME: What the fuck wrong happened here?
+        #ce_loss = ce_criterion(predict, support_label)
 
         # compute energy
-        neg_samples, neg_id = sample_ebm(fc, replay_buffer)
-        neg_energy = (-1.0 * torch.logsumexp(fc(neg_samples))).mean()
-        pos_energy = (-1.0 * torch.logsumexp(fc(pos_samples))).mean()
-        energy_loss = (pos_energy - neg_energy) + alpha * (pos_out ** 2 + neg_out ** 2)
-        
+        neg_samples, neg_id = sample_ebm(fc, replay_buffer, pos_samples)
+        neg_energy = (-1.0 * torch.logsumexp(fc(neg_samples), 1)).mean()
+        pos_energy = (-1.0 * torch.logsumexp(fc(pos_samples), 1)).mean()
+        energy_loss = (pos_energy - neg_energy) + alpha * (pos_energy ** 2 + neg_energy ** 2)
+        ce_loss = ce_criterion(predict, support_label)
+
         loss = ce_loss + beta * energy_loss 
         loss.backward() 
 
         clip_grad(fc.parameters(), optimizer)
         optimizer.step() 
-        buffer.push(neg_samples, neg_id)
+        fc.zero_grad() 
+
+        replay_buffer.push(neg_samples, neg_id)
 
     query_predict = fc(query).argmax(dim=-1)
-    acc = (query_predict == test_label)/test_label.sum()
+    # acc = (query_predict == test_label)/test_label.sum()
+    acc = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
 
     return acc 
 
