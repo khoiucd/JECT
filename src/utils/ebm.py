@@ -5,9 +5,12 @@ from numpy import linalg as LA
 from torch.nn import functional as F
 
 class SampleBuffer:
-    def __init__(self, max_samples=10000):
+    def __init__(self, max_samples=10000, train_feat=None, n_classes=5, p=0.95):
         self.max_samples = max_samples
         self.buffer = []
+        self.n_classes = n_classes
+        self.p = p
+        self.train_feat = train_feat
 
     def __len__(self):
         return len(self.buffer)
@@ -32,28 +35,62 @@ class SampleBuffer:
 
         return samples, class_ids
 
+    def init_sample(self, data_shape, data_device):
+        """
+            Initialize negative sample from either uniform distribution or feature of data in train set
+        """
+        if self.train_feat is None:
+            return torch.rand(data_shape, device=data_device)
+        else:
+            n_samples = data_shape[0]
+            idx = np.random.choice(self.train_feat.shape[0], n_samples)
+            return torch.tensor(self.train_feat[idx], device=data_device)
 
-def sample_buffer(buffer, pos_data, n_classes=5, p=0.95, norm_kwargs=None):
-    batch_size = pos_data.size(0)
-    device = pos_data.device
 
-    if len(buffer) < 1:
+    def sample_buffer(self, pos_data, norm_kwargs=None):
+        batch_size = pos_data.size(0)
+        device = pos_data.device
+
+        if len(self.buffer) < 1:
+            return (
+                data_normalize(self.init_sample(pos_data.shape, device), norm_kwargs),
+                torch.randint(0, self.n_classes, (batch_size,), device=device),
+            )
+
+        n_replay = (np.random.rand(batch_size) < self.p).sum()
+
+        replay_sample, replay_id = self.get(n_replay)
+        replay_sample, replay_id = replay_sample.to(device), replay_id.to(device)
+        random_sample = data_normalize(self.init_sample((batch_size - n_replay, pos_data.size(1)), data_device=device), norm_kwargs)
+        random_id = torch.randint(0, self.n_classes, (batch_size - n_replay,), device=device)
+
         return (
-            data_normalize(torch.rand(pos_data.shape, device=device), norm_kwargs),
-            torch.randint(0, n_classes, (batch_size,), device=device),
+            torch.cat([replay_sample, random_sample], 0),
+            torch.cat([replay_id, random_id], 0),
         )
 
-    n_replay = (np.random.rand(batch_size) < p).sum()
 
-    replay_sample, replay_id = buffer.get(n_replay)
-    replay_sample, replay_id = replay_sample.to(device), replay_id.to(device)
-    random_sample = data_normalize(torch.rand(batch_size - n_replay, pos_data.size(1), device=device), norm_kwargs)
-    random_id = torch.randint(0, n_classes, (batch_size - n_replay,), device=device)
+# def sample_buffer(buffer, pos_data, n_classes=5, p=0.95, norm_kwargs=None):
+#     batch_size = pos_data.size(0)
+#     device = pos_data.device
 
-    return (
-        torch.cat([replay_sample, random_sample], 0),
-        torch.cat([replay_id, random_id], 0),
-    )
+#     if len(buffer) < 1:
+#         return (
+#             data_normalize(torch.rand(pos_data.shape, device=device), norm_kwargs),
+#             torch.randint(0, n_classes, (batch_size,), device=device),
+#         )
+
+#     n_replay = (np.random.rand(batch_size) < p).sum()
+
+#     replay_sample, replay_id = buffer.get(n_replay)
+#     replay_sample, replay_id = replay_sample.to(device), replay_id.to(device)
+#     random_sample = data_normalize(torch.rand(batch_size - n_replay, pos_data.size(1), device=device), norm_kwargs)
+#     random_id = torch.randint(0, n_classes, (batch_size - n_replay,), device=device)
+
+#     return (
+#         torch.cat([replay_sample, random_sample], 0),
+#         torch.cat([replay_id, random_id], 0),
+#     )
 
 def sample_data(loader):
     loader_iter = iter(loader)
@@ -80,11 +117,11 @@ def data_normalize(inp, kwargs):
     else: #unnormalize
         return inp
 
-def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20, norm_kwargs=None):
+def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=10, norm_kwargs=None):
     data_shape = pos_data.shape
     batch_size = data_shape[0]
 
-    neg_data, neg_id = sample_buffer(replay_buffer, pos_data, norm_kwargs=norm_kwargs)
+    neg_data, neg_id = replay_buffer.sample_buffer(pos_data, norm_kwargs=norm_kwargs)
     neg_data.requires_grad = True 
 
     requires_grad(model.parameters(), False)

@@ -35,7 +35,7 @@ from lshot_update import bound_update
 from utils.ebm import SampleBuffer, sample_ebm, clip_grad
 
 best_prec1 = -1
-CLASSIFIER_UPDATE_STEPS = 50
+CLASSIFIER_UPDATE_STEPS = 100 
 BETA_WEIGHT = 0.5
 
 def main():
@@ -100,7 +100,6 @@ def main():
             log.info('[Attention]: Do not find checkpoint {}'.format(args.resume))
 
     # Data loading code
-
     if args.evaluate:
         do_extract_and_evaluate(model, log)
         return
@@ -374,6 +373,30 @@ def rand_bbox(size, lam):
 
     return bbx1, bby1, bbx2, bby2
 
+def extract_all_features(train_loader, val_loader, model, tag='last'):
+    """
+        Extract feature of all image in train set
+        Use this function for sampling EBM models
+    """    
+    # return out mean, fcout mean, out feature, fcout features
+    save_dir = '{}/{}/{}'.format(args.save_path, tag, args.enlarge)
+    if os.path.isfile(save_dir + '/all_train_output.plk'):
+        data = load_pickle(save_dir + '/all_train_output.plk')
+        return data
+    else:
+        if not os.path.isdir(save_dir):
+            os.makedirs(save_dir)
+
+    model.eval()
+    with torch.no_grad():
+        # get training mean
+        out = []
+        for i, (inputs, _) in enumerate(warp_tqdm(train_loader)):
+            outputs, _ = model(inputs, True)
+            out.append(outputs.cpu().data.numpy())
+        out = np.concatenate(out, axis=0)
+        save_pickle(save_dir + '/all_train_output.plk', out)
+        return out
 
 def extract_feature(train_loader, val_loader, model, tag='last'):
     # return out mean, fcout mean, out feature, fcout features
@@ -521,14 +544,14 @@ def compute_confidence_interval(data):
     return m, pm
 
 
-def meta_evaluate(data, train_mean, shot, norm='UN'):
+def meta_evaluate(data, train_mean, shot, norm='UN', train_feat=None):
     ft_list = []
     lap_list = []
     jem_list = []
     for _ in warp_tqdm(range(args.meta_test_iter)):
         train_data, test_data, train_label, test_label = sample_case(data, shot)
         acc = jem_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
-                                norm_type=norm)
+                                norm_type=norm, train_feat=train_feat)
         jem_list.append(acc)
         acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
                                 norm_type=norm)
@@ -607,7 +630,7 @@ class EntropyLoss(nn.Module):
         b = -1.0 * b.sum(dim=1)
         return b.mean()
 
-def jem_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
+def jem_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N', train_feat=None):
     # compute normalization
     if norm_type == 'CL2N':
         gallery = gallery - train_mean
@@ -665,9 +688,9 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     ce_criterion = nn.CrossEntropyLoss()
     entropy_criterion = EntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
-    replay_buffer = SampleBuffer()
-    pos_samples = torch.cat([gallery, query], dim=0)
-    # pos_samples = gallery 
+    replay_buffer = SampleBuffer(train_feat=train_feat)
+    # pos_samples = torch.cat([gallery, query], dim=0)
+    pos_samples = gallery 
 
     # hyperparam
     n_steps = CLASSIFIER_UPDATE_STEPS
@@ -784,7 +807,7 @@ def finetune_metric_class_type(gallery, query, support_label, test_label, shot, 
         loss = ce_loss
         loss.backward() 
 
-        clip_grad(fc.parameters(), optimizer)
+        # clip_grad(fc.parameters(), optimizer)
         optimizer.step() 
         fc.zero_grad() 
 
@@ -912,12 +935,13 @@ def do_extract_and_evaluate(model, log):
     ## With the last model trained on source dataset
     load_checkpoint(model, 'last')
     out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(train_loader, val_loader, model, 'last')
+    train_feat = extract_all_features(train_loader, val_loader, model, 'last')
     norm1 = 'UN'
     norm2 = 'L2N'
     norm3 = 'CL2N'
-    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1)
-    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2)
-    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3)
+    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1, train_feat=train_feat)
+    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2, train_feat=train_feat)
+    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3, train_feat=train_feat)
 
     print(
         'Meta Test: LAST\nfeature\tFT\tLAP\tJEM\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
@@ -925,9 +949,9 @@ def do_extract_and_evaluate(model, log):
     ## With the best model trained on source dataset
     load_checkpoint(model, 'best')
     out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(train_loader, val_loader, model, 'best')
-    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1)
-    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2)
-    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3)
+    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1, train_feat=train_feat)
+    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2, train_feat=train_feat)
+    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3, train_feat=train_feat)
     print(
         'Meta Test: BEST\nfeature\tFT\tLAP\tJEM\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
             'GVP ' + str(norm1), *accuracy_info_shot1_norm1, 'GVP ' + str(norm2), *accuracy_info_shot1_norm2, 'GVP ' + str(norm3), *accuracy_info_shot1_norm3))
