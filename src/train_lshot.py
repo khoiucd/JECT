@@ -27,14 +27,15 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import NearestNeighbors
 from torch.optim.lr_scheduler import MultiStepLR, StepLR, CosineAnnealingLR
+from torch.nn.utils import spectral_norm 
 
 from utils import configuration
 from lshot_update import bound_update
 from utils.ebm import SampleBuffer, sample_ebm, clip_grad
 
 best_prec1 = -1
-CLASSIFIER_UPDATE_STEPS = 25
-BETA_WEIGHT = 0.25
+CLASSIFIER_UPDATE_STEPS = 100
+BETA_WEIGHT = 1
 
 def main():
     global args, best_prec1
@@ -647,14 +648,15 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     support_label = torch.tensor(support_label, device='cuda:0')
     test_label = torch.tensor(test_label, device='cuda:0')
     # TODO: Bias or not
-    fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
+    fc = spectral_norm(nn.Linear(feat_dim, n_classes)).to(gallery.device)
     # init fc weight = prototype 
     # FIXME: Current implementation is wrong, need to sort gallery in class id order
     fc.weight.data = gallery.reshape(n_classes, feat_dim)
     ce_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
     replay_buffer = SampleBuffer()
-    pos_samples = gallery
+    # pos_samples = torch.cat([gallery, query], dim=0)
+    pos_samples = gallery 
 
     # hyperparam
     n_steps = CLASSIFIER_UPDATE_STEPS

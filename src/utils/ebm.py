@@ -33,13 +33,13 @@ class SampleBuffer:
         return samples, class_ids
 
 
-def sample_buffer(buffer, pos_data, n_classes=5, p=0.95):
+def sample_buffer(buffer, pos_data, n_classes=5, p=0.95, norm_kwargs=None):
     batch_size = pos_data.size(0)
     device = pos_data.device
 
     if len(buffer) < 1:
         return (
-            torch.rand(pos_data.shape, device=device),
+            data_normalize(torch.rand(pos_data.shape, device=device), norm_kwargs),
             torch.randint(0, n_classes, (batch_size,), device=device),
         )
 
@@ -47,14 +47,13 @@ def sample_buffer(buffer, pos_data, n_classes=5, p=0.95):
 
     replay_sample, replay_id = buffer.get(n_replay)
     replay_sample, replay_id = replay_sample.to(device), replay_id.to(device)
-    random_sample = torch.rand(batch_size - n_replay, pos_data.size(1), device=device)
+    random_sample = data_normalize(torch.rand(batch_size - n_replay, pos_data.size(1), device=device), norm_kwargs)
     random_id = torch.randint(0, n_classes, (batch_size - n_replay,), device=device)
 
     return (
         torch.cat([replay_sample, random_sample], 0),
         torch.cat([replay_id, random_id], 0),
     )
-
 
 def sample_data(loader):
     loader_iter = iter(loader)
@@ -81,11 +80,11 @@ def data_normalize(inp, kwargs):
     else: #unnormalize
         return inp
 
-def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20, norm_kwargs=None):
+def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=10, norm_kwargs=None):
     data_shape = pos_data.shape
     batch_size = data_shape[0]
 
-    neg_data, neg_id = sample_buffer(replay_buffer, pos_data)
+    neg_data, neg_id = sample_buffer(replay_buffer, pos_data, norm_kwargs=norm_kwargs)
     neg_data.requires_grad = True 
 
     requires_grad(model.parameters(), False)
@@ -106,7 +105,7 @@ def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20, 
         neg_data.grad.detach_()
         neg_data.grad.zero_()
 
-        neg_data.data = data_normalize(neg_data.data, norm_kwargs)
+        # neg_data.data = data_normalize(neg_data.data, norm_kwargs)
 
     neg_data = neg_data.detach()
 
