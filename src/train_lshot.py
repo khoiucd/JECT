@@ -685,7 +685,7 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
 
     query_predict = fc(query).argmax(dim=-1)
     # acc = (query_predict == test_label)/test_label.sum()
-    acc = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
+    acc, _ = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
 
     return acc 
 
