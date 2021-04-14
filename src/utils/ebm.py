@@ -1,7 +1,8 @@
 import torch
 import random
 import numpy as np 
-
+from numpy import linalg as LA
+from torch.nn import functional as F
 
 class SampleBuffer:
     def __init__(self, max_samples=10000):
@@ -67,7 +68,20 @@ def sample_data(loader):
 
             yield next(loader_iter)
 
-def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20):
+def data_normalize(inp, kwargs):
+    if kwargs is None:
+        return inp 
+        
+    norm_type = kwargs['norm_type']
+    if norm_type == 'L2N':
+        return F.normalize(inp, p=2, dim=1)
+    elif norm_type == 'CL2N':
+        mean = kwargs['mean']
+        return F.normalize(inp-mean, p=2, dim=1)
+    else: #unnormalize
+        return inp
+
+def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20, norm_kwargs=None):
     data_shape = pos_data.shape
     batch_size = data_shape[0]
 
@@ -86,11 +100,13 @@ def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20):
         neg_energy.sum().backward()
         
         # TODO: update hyperparam
-        neg_data.grad.data.clamp_(-0.01, 0.01)
+        neg_data.grad.data.clamp_(-1, 1)
         neg_data.data.add_(-step_size, neg_data.grad.data)
 
         neg_data.grad.detach_()
         neg_data.grad.zero_()
+
+        neg_data.data = data_normalize(neg_data.data, norm_kwargs)
 
     neg_data = neg_data.detach()
 

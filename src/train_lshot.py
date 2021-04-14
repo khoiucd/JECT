@@ -33,7 +33,8 @@ from lshot_update import bound_update
 from utils.ebm import SampleBuffer, sample_ebm, clip_grad
 
 best_prec1 = -1
-
+CLASSIFIER_UPDATE_STEPS = 25
+BETA_WEIGHT = 0.25
 
 def main():
     global args, best_prec1
@@ -518,25 +519,25 @@ def compute_confidence_interval(data):
     return m, pm
 
 
-def meta_evaluate(data, train_mean, shot):
-    un_list = []
-    l2n_list = []
-    cl2n_list = []
+def meta_evaluate(data, train_mean, shot, norm='UN'):
+    ft_list = []
+    lap_list = []
+    jem_list = []
     for _ in warp_tqdm(range(args.meta_test_iter)):
         train_data, test_data, train_label, test_label = sample_case(data, shot)
         acc = jem_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
-                                norm_type='CL2N')
-        cl2n_list.append(acc)
+                                norm_type=norm)
+        jem_list.append(acc)
         acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
-                                norm_type='L2N')
-        l2n_list.append(acc)
-        acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
-                                norm_type='UN')
-        un_list.append(acc)
-    un_mean, un_conf = compute_confidence_interval(un_list)
-    l2n_mean, l2n_conf = compute_confidence_interval(l2n_list)
-    cl2n_mean, cl2n_conf = compute_confidence_interval(cl2n_list)
-    return un_mean, un_conf, l2n_mean, l2n_conf, cl2n_mean, cl2n_conf
+                                norm_type=norm)
+        lap_list.append(acc)
+        acc = finetune_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
+                                norm_type=norm)
+        ft_list.append(acc)
+    ft_mean, ft_conf = compute_confidence_interval(ft_list)
+    lap_mean, lap_conf = compute_confidence_interval(lap_list)
+    jem_mean, jem_conf = compute_confidence_interval(jem_list)
+    return ft_mean, ft_conf, lap_mean, lap_conf, jem_mean, jem_conf
 
 def meta_evaluate_tune(data, train_mean, shot):
     cl2n_list = []
@@ -653,14 +654,18 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     ce_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
     replay_buffer = SampleBuffer()
-    pos_samples = torch.cat([gallery, query], dim=0)
+    pos_samples = gallery
 
     # hyperparam
-    n_steps = 100
+    n_steps = CLASSIFIER_UPDATE_STEPS
     alpha = 1
-    beta = 1
+    beta = BETA_WEIGHT
 
     fc.train()
+    norm_kwargs = {'norm_type': norm_type} 
+    if norm_type == 'CL2N':
+        norm_kwargs['mean'] = torch.tensor(train_mean, device='cuda:0')
+
     for step in range(n_steps):
         # cross-entropy loss 
         predict = fc(gallery)
@@ -668,10 +673,10 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
         #ce_loss = ce_criterion(predict, support_label)
 
         # compute energy
-        neg_samples, neg_id = sample_ebm(fc, replay_buffer, pos_samples)
+        neg_samples, neg_id = sample_ebm(fc, replay_buffer, pos_samples, norm_kwargs=norm_kwargs)
         neg_energy = (-1.0 * torch.logsumexp(fc(neg_samples), 1)).mean()
         pos_energy = (-1.0 * torch.logsumexp(fc(pos_samples), 1)).mean()
-        energy_loss = (pos_energy - neg_energy) + alpha * (pos_energy ** 2 + neg_energy ** 2)
+        energy_loss = (pos_energy - neg_energy)
         ce_loss = ce_criterion(predict, support_label)
 
         loss = ce_loss + beta * energy_loss 
@@ -689,6 +694,85 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
 
     return acc 
 
+def finetune_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
+    # compute normalization
+    if norm_type == 'CL2N':
+        gallery = gallery - train_mean
+        gallery = gallery / LA.norm(gallery, 2, 1)[:, None]
+        query = query - train_mean
+        query = query / LA.norm(query, 2, 1)[:, None]
+    elif norm_type == 'L2N':
+        gallery = gallery / LA.norm(gallery, 2, 1)[:, None]
+        query = query / LA.norm(query, 2, 1)[:, None]
+
+    # rectified prototype or note
+    if args.proto_rect:
+        eta = gallery.mean(0) - query.mean(0) # shift
+        query = query + eta[np.newaxis,:]
+        query_aug = np.concatenate((gallery, query),axis=0)
+        gallery_ = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1)
+        gallery_ = torch.from_numpy(gallery_)
+        query_aug = torch.from_numpy(query_aug)
+        distance = get_metric('cosine')(gallery_, query_aug)
+        predict = torch.argmin(distance, dim=1)
+        cos_sim = F.cosine_similarity(query_aug[:, None, :], gallery_[None, :, :], dim=2)
+        cos_sim = 10 * cos_sim
+        W = F.softmax(cos_sim,dim=1)
+        gallery_list = [(W[predict==i,i].unsqueeze(1)*query_aug[predict==i]).mean(0,keepdim=True) for i in predict.unique()]
+        gallery = torch.cat(gallery_list,dim=0).numpy()
+    else:
+        gallery = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1) # (5, 1, D)
+
+    feat_dim = gallery.shape[-1]
+    n_classes = args.meta_val_way
+
+    # map global class to task class (i.e. 64 class to 5 class)
+    global2task = {}
+    idx = 0
+    for c in support_label:
+        if c in global2task.keys():
+            continue
+        global2task[c] = idx
+        idx += 1 
+
+    task2global = {v: k for k, v in global2task.items()}
+    support_label = [global2task[v] for v in support_label]
+    test_label = [global2task[v] for v in test_label]
+
+    # prepare for training linear
+    gallery = torch.tensor(gallery, device='cuda:0')
+    query = torch.tensor(query, device='cuda:0')
+    support_label = torch.tensor(support_label, device='cuda:0')
+    test_label = torch.tensor(test_label, device='cuda:0')
+    # TODO: Bias or not
+    fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
+    # init fc weight = prototype 
+    # FIXME: Current implementation is wrong, need to sort gallery in class id order
+    fc.weight.data = gallery.reshape(n_classes, feat_dim)
+    ce_criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(fc.parameters())
+
+    # hyperparam
+    n_steps = CLASSIFIER_UPDATE_STEPS 
+
+    fc.train()
+    for step in range(n_steps):
+        # cross-entropy loss 
+        predict = fc(gallery)
+        ce_loss = ce_criterion(predict, support_label)
+
+        loss = ce_loss
+        loss.backward() 
+
+        clip_grad(fc.parameters(), optimizer)
+        optimizer.step() 
+        fc.zero_grad() 
+
+    query_predict = fc(query).argmax(dim=-1)
+    # acc = (query_predict == test_label)/test_label.sum()
+    acc, _ = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
+
+    return acc 
 
 def metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
     if norm_type == 'CL2N':
@@ -805,41 +889,28 @@ def do_extract_and_evaluate(model, log):
         best_lmd_1 = best_lmd_5 = args.lmd
     val_loader = get_dataloader('test', aug=False, shuffle=False, out_name=False)
     print(' Proto-rectification = {} in Evaluation'.format(args.proto_rect))
-    log.info(' Proto-rectification = {} in Evaluation'.format(args.proto_rect))
     ## With the last model trained on source dataset
     load_checkpoint(model, 'last')
     out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(train_loader, val_loader, model, 'last')
-    args.lmd = best_lmd_1
-    print(' Run with lambda {} for 1 shot'.format(args.lmd))
-    log.info(' Run with lambda {} for 1 shot'.format(args.lmd))
-    accuracy_info_shot1 = meta_evaluate(out_dict, out_mean, 1)
-    args.lmd = best_lmd_5
-    print(' Run with lambda {} for 5 shot'.format(args.lmd))
-    log.info(' Run with lambda {} for 5 shot'.format(args.lmd))
-    accuracy_info_shot5 = meta_evaluate(out_dict, out_mean, 5)
+    norm1 = 'UN'
+    norm2 = 'L2N'
+    norm3 = 'CL2N'
+    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1)
+    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2)
+    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3)
+
     print(
-        'Meta Test: LAST\nfeature\tUN\tL2N\tCL2N\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
-            'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
-    log.info(
-        'Meta Test: LAST\nfeature\tUN\tL2N\tCL2N\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
-            'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
+        'Meta Test: LAST\nfeature\tFT\tLAP\tJEM\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
+            'GVP ' + str(norm1), *accuracy_info_shot1_norm1, 'GVP ' + str(norm2), *accuracy_info_shot1_norm2, 'GVP ' + str(norm3), *accuracy_info_shot1_norm3))
     ## With the best model trained on source dataset
     load_checkpoint(model, 'best')
     out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(train_loader, val_loader, model, 'best')
-    args.lmd = best_lmd_1
-    print(' Run with lambda {} for 1 shot'.format(args.lmd))
-    log.info(' Run with lambda {} for 1 shot'.format(args.lmd))
-    accuracy_info_shot1 = meta_evaluate(out_dict, out_mean, 1)
-    args.lmd = best_lmd_5
-    print(' Run with lambda {} for 5 shot'.format(args.lmd))
-    log.info(' Run with lambda {} for 5 shot'.format(args.lmd))
-    accuracy_info_shot5 = meta_evaluate(out_dict, out_mean, 5)
+    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1)
+    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2)
+    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3)
     print(
-        'Meta Test: BEST\nfeature\tUN\tL2N\tCL2N\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
-            'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
-    log.info(
-        'Meta Test: BEST\nfeature\tUN\tL2N\tCL2N\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
-            'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
+        'Meta Test: BEST\nfeature\tFT\tLAP\tJEM\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
+            'GVP ' + str(norm1), *accuracy_info_shot1_norm1, 'GVP ' + str(norm2), *accuracy_info_shot1_norm2, 'GVP ' + str(norm3), *accuracy_info_shot1_norm3))
 
 
 if __name__ == '__main__':
