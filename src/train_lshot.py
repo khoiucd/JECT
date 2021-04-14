@@ -7,6 +7,7 @@ import collections
 import pickle
 import tqdm
 import torch
+import copy
 
 import numpy as np
 import torch.backends.cudnn as cudnn
@@ -34,8 +35,8 @@ from lshot_update import bound_update
 from utils.ebm import SampleBuffer, sample_ebm, clip_grad
 
 best_prec1 = -1
-CLASSIFIER_UPDATE_STEPS = 100
-BETA_WEIGHT = 1
+CLASSIFIER_UPDATE_STEPS = 50
+BETA_WEIGHT = 0.5
 
 def main():
     global args, best_prec1
@@ -597,6 +598,15 @@ def lshot_prediction(args, knn, lmd, X, unary, support_label, test_label):
     acc, _ = get_accuracy(test_label, out)
     return acc
 
+class EntropyLoss(nn.Module):
+    def __init__(self):
+        super(EntropyLoss, self).__init__()
+
+    def forward(self, x):
+        b = F.softmax(x, dim=1) * F.log_softmax(x, dim=1)
+        b = -1.0 * b.sum(dim=1)
+        return b.mean()
+
 def jem_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
     # compute normalization
     if norm_type == 'CL2N':
@@ -648,15 +658,16 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     support_label = torch.tensor(support_label, device='cuda:0')
     test_label = torch.tensor(test_label, device='cuda:0')
     # TODO: Bias or not
-    fc = spectral_norm(nn.Linear(feat_dim, n_classes)).to(gallery.device)
+    fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
     # init fc weight = prototype 
     # FIXME: Current implementation is wrong, need to sort gallery in class id order
-    fc.weight.data = gallery.reshape(n_classes, feat_dim)
+    fc.weight.data = copy.deepcopy(gallery.reshape(n_classes, feat_dim))
     ce_criterion = nn.CrossEntropyLoss()
+    entropy_criterion = EntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
     replay_buffer = SampleBuffer()
-    # pos_samples = torch.cat([gallery, query], dim=0)
-    pos_samples = gallery 
+    pos_samples = torch.cat([gallery, query], dim=0)
+    # pos_samples = gallery 
 
     # hyperparam
     n_steps = CLASSIFIER_UPDATE_STEPS
@@ -669,22 +680,29 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
         norm_kwargs['mean'] = torch.tensor(train_mean, device='cuda:0')
 
     for step in range(n_steps):
+        pos_sample = pos_samples
         # cross-entropy loss 
         predict = fc(gallery)
         # FIXME: What the fuck wrong happened here?
         #ce_loss = ce_criterion(predict, support_label)
 
         # compute energy
-        neg_samples, neg_id = sample_ebm(fc, replay_buffer, pos_samples, norm_kwargs=norm_kwargs)
+        # negative sample
+        neg_samples, neg_id = sample_ebm(fc, replay_buffer, pos_sample, norm_kwargs=norm_kwargs)
         neg_energy = (-1.0 * torch.logsumexp(fc(neg_samples), 1)).mean()
-        pos_energy = (-1.0 * torch.logsumexp(fc(pos_samples), 1)).mean()
+        # positive sample
+        pos_out = fc(pos_sample)
+        pos_energy = (-1.0 * torch.logsumexp(pos_out, 1)).mean()
+
+        # compute loss
         energy_loss = (pos_energy - neg_energy)
         ce_loss = ce_criterion(predict, support_label)
+        # entropy_loss = entropy_criterion(pos_out)
 
-        loss = ce_loss + beta * energy_loss 
+        loss = ce_loss + beta * energy_loss # + entropy_loss
         loss.backward() 
 
-        clip_grad(fc.parameters(), optimizer)
+        # clip_grad(fc.parameters(), optimizer)
         optimizer.step() 
         fc.zero_grad() 
 

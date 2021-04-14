@@ -80,7 +80,7 @@ def data_normalize(inp, kwargs):
     else: #unnormalize
         return inp
 
-def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=10, norm_kwargs=None):
+def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=20, norm_kwargs=None):
     data_shape = pos_data.shape
     batch_size = data_shape[0]
 
