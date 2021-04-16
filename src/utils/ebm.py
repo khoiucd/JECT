@@ -58,9 +58,9 @@ class SampleBuffer:
             )
 
         n_replay = (np.random.rand(batch_size) < self.p).sum()
-
-        replay_sample, replay_id = self.get(n_replay)
-        replay_sample, replay_id = replay_sample.to(device), replay_id.to(device)
+        n_replay = max(n_replay, 1) # avoid error when n_replay = 0
+        
+        replay_sample, replay_id = self.get(n_replay, device=device)
         random_sample = data_normalize(self.init_sample((batch_size - n_replay, pos_data.size(1)), data_device=device), norm_kwargs)
         random_id = torch.randint(0, self.n_classes, (batch_size - n_replay,), device=device)
 

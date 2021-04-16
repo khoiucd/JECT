@@ -706,8 +706,6 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
         pos_sample = pos_samples
         # cross-entropy loss 
         predict = fc(gallery)
-        # FIXME: What the fuck wrong happened here?
-        #ce_loss = ce_criterion(predict, support_label)
 
         # compute energy
         # negative sample
@@ -935,7 +933,8 @@ def do_extract_and_evaluate(model, log):
     ## With the last model trained on source dataset
     load_checkpoint(model, 'last')
     out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(train_loader, val_loader, model, 'last')
-    train_feat = extract_all_features(train_loader, val_loader, model, 'last')
+    # train_feat = extract_all_features(train_loader, val_loader, model, 'last')
+    train_feat = None
     norm1 = 'UN'
     norm2 = 'L2N'
     norm3 = 'CL2N'

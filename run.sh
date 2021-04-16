@@ -2,9 +2,9 @@
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0,1
 
-tune=True
+tune=False
 lmd=1.0 # Overridden when tune=True , except for iNat
-protrec=True # Add query to compute prototoypes. Set False to compute with support examples only
+protrec=False # Add query to compute prototoypes. Set False to compute with support examples only
 datapath=./data/images  # for mini
 #datapath=./data/tiered-imagenet/data  # for tiered
 #datapath=./data/CUB/CUB_200_2011/images # for CUB
