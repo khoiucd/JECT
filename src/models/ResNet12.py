@@ -70,7 +70,7 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, block=BasicBlock, keep_prob=1.0, avg_pool=True, drop_rate=0.1, dropblock_size=5):
+    def __init__(self, block=BasicBlock, keep_prob=1.0, avg_pool=True, drop_rate=0.1, dropblock_size=5, remove_linear=False, num_classes=1000):
         self.inplanes = 3
         super(ResNet, self).__init__()
 
@@ -92,6 +92,11 @@ class ResNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+        if remove_linear:
+            self.fc = None
+        else:
+            self.fc = nn.Linear(640 * block.expansion, num_classes)
+            
     def _make_layer(self, block, planes, stride=1, drop_rate=0.0, drop_block=False, block_size=1):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
@@ -107,7 +112,7 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, feature=None):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -115,10 +120,21 @@ class ResNet(nn.Module):
         if self.keep_avg_pool:
             x = self.avgpool(x)
         x = x.view(x.size(0), -1)
+        
+        if self.fc is None:
+            if feature:
+                return x, None
+            else:
+                return x
+        if feature:
+            x1 = self.fc(x)
+            return x, x1
+        x = self.fc(x)
+        
         return x
 
 
-def Res12(keep_prob=1.0, avg_pool=False, **kwargs):
+def resnet12(keep_prob=1.0, avg_pool=True, **kwargs):
     """Constructs a ResNet-12 model.
     """
     model = ResNet(BasicBlock, keep_prob=keep_prob, avg_pool=avg_pool, **kwargs)
