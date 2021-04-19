@@ -149,7 +149,7 @@ def main():
     print("Start Distillation")
     log.info("Start Distillation")
     n_generations = 2
-    student=model
+    student = model
     
     for i in range(n_generations):
         print("Distillation for generation: " + str(i))
@@ -171,7 +171,7 @@ def main():
             # evaluate on meta validation set
             is_best = False
             if (epoch + 1) % args.meta_val_interval == 0:
-                prec1 = meta_val(val_loader, model)
+                prec1 = meta_val(val_loader, student)
                 log.info('Meta Val {}: {}'.format(epoch, prec1))
                 is_best = prec1 > best_prec1
                 best_prec1 = max(prec1, best_prec1)
