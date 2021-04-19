@@ -34,10 +34,12 @@ from torch.nn.utils import spectral_norm
 from utils import configuration
 from lshot_update import bound_update
 from utils.ebm import SampleBuffer, sample_ebm, clip_grad
+from utils.losses import DistillKL
 
 best_prec1 = -1
 CLASSIFIER_UPDATE_STEPS = 100 
 BETA_WEIGHT = 0.5
+
 
 def main():
     global args, best_prec1
@@ -88,6 +90,7 @@ def main():
 
     if args.resume:
         if os.path.isfile(args.resume):
+            print("=> loading checkpoint '{}'".format(args.resume))
             log.info("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
@@ -143,15 +146,24 @@ def main():
             'optimizer': optimizer.state_dict(),
         }, is_best, folder=args.save_path)
     
+    print("Start Distillation")
+    log.info("Start Distillation")
     n_generations = 2
-    student=copy.deepcopy(model)
+    student=model
     
     for i in range(n_generations):
-        # BAN training
+        print("Distillation for generation: " + str(i))
+        log.info("Distillation for generation: " + str(i))
+        
+        # clean and set up model, optimizer, scheduler and stuff
         teacher = student
         student = models.__dict__[args.arch](num_classes=args.num_classes, remove_linear=args.do_meta_train)
         student = torch.nn.DataParallel(student).cuda()
-
+        optimizer = get_optimizer(student)
+        scheduler = get_scheduler(len(train_loader), optimizer)
+        tqdm_loop = warp_tqdm(list(range(0, args.epochs)))
+        best_prec1 = 0
+        
         for epoch in tqdm_loop:
             # train for one epoch
             train_distil(train_loader, teacher, student, criterion, optimizer, epoch, scheduler, log)
@@ -241,7 +253,7 @@ def train_distil(train_loader, t_model, s_model, criterion, optimizer, epoch, sc
     end = time.time()
     tqdm_train_loader = warp_tqdm(train_loader)
 
-    kd_criterion = nn.KLDivLoss()
+    kd_criterion = DistillKL(T=1) 
 
     for i, (input, target) in enumerate(tqdm_train_loader):
         if args.scheduler == 'cosine':
@@ -254,7 +266,8 @@ def train_distil(train_loader, t_model, s_model, criterion, optimizer, epoch, sc
         target = target.cuda(non_blocking=True)
 
         # compute output
-        t_output = t_model(input)
+        with torch.no_grad():
+            t_output = t_model(input)
         s_output = s_model(input)
         
         loss = 0.5 * criterion(s_output, target) + 0.5 * kd_criterion(s_output, t_output)
@@ -361,6 +374,8 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler, log):
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', folder='result/default'):
+    if not osp.isdir(folder):
+        os.mkdir(folder)
     torch.save(state, folder + '/' + filename)
     if is_best:
         shutil.copyfile(folder + '/' + filename, folder + '/model_best.pth.tar')
