@@ -10,6 +10,7 @@ import torch
 import copy
 
 import numpy as np
+import os.path as osp
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
@@ -116,6 +117,8 @@ def main():
 
     scheduler = get_scheduler(len(train_loader), optimizer)
     tqdm_loop = warp_tqdm(list(range(args.start_epoch, args.epochs)))
+
+    # crossentropy training
     for epoch in tqdm_loop:
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, scheduler, log)
@@ -139,7 +142,42 @@ def main():
             'best_prec1': best_prec1,
             'optimizer': optimizer.state_dict(),
         }, is_best, folder=args.save_path)
+    
+    n_generations = 2
+    student=copy.deepcopy(model)
+    
+    for i in range(n_generations):
+        # BAN training
+        teacher = student
+        student = models.__dict__[args.arch](num_classes=args.num_classes, remove_linear=args.do_meta_train)
+        student = torch.nn.DataParallel(student).cuda()
 
+        for epoch in tqdm_loop:
+            # train for one epoch
+            train_distil(train_loader, teacher, student, criterion, optimizer, epoch, scheduler, log)
+            scheduler.step(epoch)
+            # evaluate on meta validation set
+            is_best = False
+            if (epoch + 1) % args.meta_val_interval == 0:
+                prec1 = meta_val(val_loader, model)
+                log.info('Meta Val {}: {}'.format(epoch, prec1))
+                is_best = prec1 > best_prec1
+                best_prec1 = max(prec1, best_prec1)
+                if not args.disable_tqdm:
+                    tqdm_loop.set_description('Best Acc {:.2f}'.format(best_prec1 * 100.))
+
+            # remember best prec@1 and save checkpoint
+            save_checkpoint({
+                'epoch': epoch + 1,
+                # 'scheduler': scheduler.state_dict(),
+                'arch': args.arch,
+                'state_dict': student.state_dict(),
+                'best_prec1': best_prec1,
+                'optimizer': optimizer.state_dict(),
+            }, is_best, folder=osp.join(args.save_path, 'student_'+str(i)))
+    
+    model = student
+    
     # do evaluate at the end
     args.enlarge = True
     do_extract_and_evaluate(model, log)
@@ -189,6 +227,63 @@ def meta_val(test_loader, model, train_mean=None):
                 tqdm_test_loader.set_description('Acc {:.2f}'.format(top1.avg * 100))
     return top1.avg
 
+def train_distil(train_loader, t_model, s_model, criterion, optimizer, epoch, scheduler, log):
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
+    losses = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+
+    # switch to train mode
+    s_model.train()
+    t_model.train()
+
+    end = time.time()
+    tqdm_train_loader = warp_tqdm(train_loader)
+
+    kd_criterion = nn.KLDivLoss()
+
+    for i, (input, target) in enumerate(tqdm_train_loader):
+        if args.scheduler == 'cosine':
+            scheduler.step(epoch * len(train_loader) + i)
+        # measure data loading time
+        data_time.update(time.time() - end)
+
+        if args.do_meta_train:
+            target = torch.arange(args.meta_train_way)[:, None].repeat(1, args.meta_train_query).reshape(-1).long()
+        target = target.cuda(non_blocking=True)
+
+        # compute output
+        t_output = t_model(input)
+        s_output = s_model(input)
+        
+        loss = 0.5 * criterion(s_output, target) + 0.5 * kd_criterion(s_output, t_output)
+        # measure accuracy and record loss
+        losses.update(loss.item(), input.size(0))
+
+        # compute gradient and do SGD step
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        prec1, prec5 = accuracy(s_output, target, topk=(1, 5))
+        top1.update(prec1[0], input.size(0))
+        top5.update(prec5[0], input.size(0))
+        if not args.disable_tqdm:
+            tqdm_train_loader.set_description('Acc {:.2f}'.format(top1.avg))
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        if i % args.print_freq == 0:
+            log.info('Epoch: [{0}][{1}/{2}]\t'
+                     'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                     'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                     'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                     'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
+                     'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                epoch, i, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses, top1=top1, top5=top5))
 
 def train(train_loader, model, criterion, optimizer, epoch, scheduler, log):
     batch_time = AverageMeter()
