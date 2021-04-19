@@ -248,7 +248,7 @@ def train_distil(train_loader, t_model, s_model, criterion, optimizer, epoch, sc
 
     # switch to train mode
     s_model.train()
-    t_model.train()
+    t_model.eval()
 
     end = time.time()
     tqdm_train_loader = warp_tqdm(train_loader)
