@@ -28,20 +28,22 @@ from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import accuracy_score
 from sklearn.neighbors import NearestNeighbors
 from torch.optim.lr_scheduler import MultiStepLR, StepLR, CosineAnnealingLR
-from torch.nn.utils import spectral_norm 
 
 from utils import configuration
 from lshot_update import bound_update
-from utils.ebm import SampleBuffer, sample_ebm, clip_grad
+from ebm.pcd import SampleBuffer, sample_ebm, clip_grad
+from ebm.model import VERAGenerator, MLPNetwork, JEM
+from ebm.vera import train_vera
 
 best_prec1 = -1
-CLASSIFIER_UPDATE_STEPS = 100 
+CLASSIFIER_UPDATE_STEPS = 100
 BETA_WEIGHT = 0.5
+
 
 def main():
     global args, best_prec1
     args = configuration.parser_args()
-    ### initial logger
+    # initial logger
     log = setup_logger(args.save_path + args.log_file)
     for key, value in sorted(vars(args).items()):
         log.info(str(key) + ': ' + str(value))
@@ -53,9 +55,11 @@ def main():
     cudnn.deterministic = True
     # create model
     log.info("=> creating model '{}'".format(args.arch))
-    model = models.__dict__[args.arch](num_classes=args.num_classes, remove_linear=args.do_meta_train)
+    model = models.__dict__[args.arch](
+        num_classes=args.num_classes, remove_linear=args.do_meta_train)
 
-    log.info('Number of model parameters: {}'.format(sum([p.data.nelement() for p in model.parameters()])))
+    log.info('Number of model parameters: {}'.format(
+        sum([p.data.nelement() for p in model.parameters()])))
 
     model = torch.nn.DataParallel(model).cuda()
 
@@ -79,7 +83,8 @@ def main():
             model_dict.update(params)
             model.load_state_dict(model_dict)
         else:
-            log.info('[Attention]: Do not find pretrained model {}'.format(pretrain))
+            log.info(
+                '[Attention]: Do not find pretrained model {}'.format(pretrain))
 
     # resume from an exist checkpoint
     if os.path.isfile(args.save_path + '/checkpoint.pth.tar') and args.resume == '':
@@ -106,12 +111,16 @@ def main():
 
     args.enlarge = False
     if args.do_meta_train:
-        sample_info = [args.meta_train_iter, args.meta_train_way, args.meta_train_shot, args.meta_train_query]
-        train_loader = get_dataloader('train', not args.disable_train_augment, sample=sample_info)
+        sample_info = [args.meta_train_iter, args.meta_train_way,
+                       args.meta_train_shot, args.meta_train_query]
+        train_loader = get_dataloader(
+            'train', not args.disable_train_augment, sample=sample_info)
     else:
-        train_loader = get_dataloader('train', not args.disable_train_augment, shuffle=True)
+        train_loader = get_dataloader(
+            'train', not args.disable_train_augment, shuffle=True)
 
-    sample_info = [args.meta_val_iter, args.meta_val_way, args.meta_val_shot, args.meta_val_query]
+    sample_info = [args.meta_val_iter, args.meta_val_way,
+                   args.meta_val_shot, args.meta_val_query]
     val_loader = get_dataloader('val', False, sample=sample_info)
 
     scheduler = get_scheduler(len(train_loader), optimizer)
@@ -128,7 +137,8 @@ def main():
             is_best = prec1 > best_prec1
             best_prec1 = max(prec1, best_prec1)
             if not args.disable_tqdm:
-                tqdm_loop.set_description('Best Acc {:.2f}'.format(best_prec1 * 100.))
+                tqdm_loop.set_description(
+                    'Best Acc {:.2f}'.format(best_prec1 * 100.))
 
         # remember best prec@1 and save checkpoint
         save_checkpoint({
@@ -180,13 +190,16 @@ def meta_val(test_loader, model, train_mean=None):
             train_label = target[:args.meta_val_way * args.meta_val_shot]
             test_out = output[args.meta_val_way * args.meta_val_shot:]
             test_label = target[args.meta_val_way * args.meta_val_shot:]
-            train_out = train_out.reshape(args.meta_val_way, args.meta_val_shot, -1).mean(1)
+            train_out = train_out.reshape(
+                args.meta_val_way, args.meta_val_shot, -1).mean(1)
             train_label = train_label[::args.meta_val_shot]
-            prediction = metric_prediction(train_out, test_out, train_label, args.meta_val_metric)
+            prediction = metric_prediction(
+                train_out, test_out, train_label, args.meta_val_metric)
             acc = (prediction == test_label).float().mean()
             top1.update(acc.item())
             if not args.disable_tqdm:
-                tqdm_test_loader.set_description('Acc {:.2f}'.format(top1.avg * 100))
+                tqdm_test_loader.set_description(
+                    'Acc {:.2f}'.format(top1.avg * 100))
     return top1.avg
 
 
@@ -209,7 +222,8 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler, log):
         data_time.update(time.time() - end)
 
         if args.do_meta_train:
-            target = torch.arange(args.meta_train_way)[:, None].repeat(1, args.meta_train_query).reshape(-1).long()
+            target = torch.arange(args.meta_train_way)[:, None].repeat(
+                1, args.meta_train_query).reshape(-1).long()
         target = target.cuda(non_blocking=True)
 
         # compute output
@@ -221,20 +235,27 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler, log):
             target_a = target
             target_b = target[rand_index]
             bbx1, bby1, bbx2, bby2 = rand_bbox(input.size(), lam)
-            input[:, :, bbx1:bbx2, bby1:bby2] = input[rand_index, :, bbx1:bbx2, bby1:bby2]
+            input[:, :, bbx1:bbx2, bby1:bby2] = input[rand_index,
+                                                      :, bbx1:bbx2, bby1:bby2]
             # adjust lambda to exactly match pixel ratio
-            lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (input.size()[-1] * input.size()[-2]))
+            lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) /
+                       (input.size()[-1] * input.size()[-2]))
             # compute output
             output = model(input)
-            loss = criterion(output, target_a) * lam + criterion(output, target_b) * (1. - lam)
+            loss = criterion(output, target_a) * lam + \
+                criterion(output, target_b) * (1. - lam)
         else:
             output = model(input)
             if args.do_meta_train:
                 output = output.cuda(0)
-                shot_proto = output[:args.meta_train_shot * args.meta_train_way]
-                query_proto = output[args.meta_train_shot * args.meta_train_way:]
-                shot_proto = shot_proto.reshape(args.meta_train_way, args.meta_train_shot, -1).mean(1)
-                output = -get_metric(args.meta_train_metric)(shot_proto, query_proto)
+                shot_proto = output[:args.meta_train_shot *
+                                    args.meta_train_way]
+                query_proto = output[args.meta_train_shot *
+                                     args.meta_train_way:]
+                shot_proto = shot_proto.reshape(
+                    args.meta_train_way, args.meta_train_shot, -1).mean(1)
+                output = - \
+                    get_metric(args.meta_train_metric)(shot_proto, query_proto)
             loss = criterion(output, target)
 
         # measure accuracy and record loss
@@ -261,14 +282,16 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler, log):
                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, top5=top5))
+                         epoch, i, len(train_loader), batch_time=batch_time,
+                         data_time=data_time, loss=losses, top1=top1, top5=top5))
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar', folder='result/default'):
     torch.save(state, folder + '/' + filename)
     if is_best:
-        shutil.copyfile(folder + '/' + filename, folder + '/model_best.pth.tar')
+        shutil.copyfile(folder + '/' + filename,
+                        folder + '/model_best.pth.tar')
+
 
 class SmoothCrossEntropy(nn.Module):
     def __init__(self, epsilon: float = 0.):
@@ -276,9 +299,11 @@ class SmoothCrossEntropy(nn.Module):
         self.epsilon = float(epsilon)
 
     def forward(self, logits: torch.Tensor, labels: torch.LongTensor) -> torch.Tensor:
-        target_probs = torch.full_like(logits, self.epsilon / (logits.shape[1] - 1))
+        target_probs = torch.full_like(
+            logits, self.epsilon / (logits.shape[1] - 1))
         target_probs.scatter_(1, labels.unsqueeze(1), 1 - self.epsilon)
         return F.kl_div(torch.log_softmax(logits, 1), target_probs, reduction='batchmean')
+
 
 class AverageMeter(object):
     def __init__(self):
@@ -373,11 +398,12 @@ def rand_bbox(size, lam):
 
     return bbx1, bby1, bbx2, bby2
 
+
 def extract_all_features(train_loader, val_loader, model, tag='last'):
     """
         Extract feature of all image in train set
         Use this function for sampling EBM models
-    """    
+    """
     # return out mean, fcout mean, out feature, fcout features
     save_dir = '{}/{}/{}'.format(args.save_path, tag, args.enlarge)
     if os.path.isfile(save_dir + '/all_train_output.plk'):
@@ -397,6 +423,7 @@ def extract_all_features(train_loader, val_loader, model, tag='last'):
         out = np.concatenate(out, axis=0)
         save_pickle(save_dir + '/all_train_output.plk', out)
         return out
+
 
 def extract_feature(train_loader, val_loader, model, tag='last'):
     # return out mean, fcout mean, out feature, fcout features
@@ -423,7 +450,7 @@ def extract_feature(train_loader, val_loader, model, tag='last'):
                 fc_out_mean = np.concatenate(fc_out_mean, axis=0).mean(0)
             else:
                 fc_out_mean = -1
-            save_pickle(save_dir + '/output_mean.plk', [out_mean,fc_out_mean])
+            save_pickle(save_dir + '/output_mean.plk', [out_mean, fc_out_mean])
         else:
             out_mean, fc_out_mean = load_pickle(save_dir + '/output_mean.plk')
 
@@ -443,6 +470,7 @@ def extract_feature(train_loader, val_loader, model, tag='last'):
         all_info = [out_mean, fc_out_mean, output_dict, fc_output_dict]
         save_pickle(save_dir + '/output.plk', all_info)
         return all_info
+
 
 def extract_feature_tune(train_loader, val_loader, model, tag='best'):
     # return out mean, fcout mean, out feature, fcout features
@@ -469,7 +497,7 @@ def extract_feature_tune(train_loader, val_loader, model, tag='best'):
                 fc_out_mean = np.concatenate(fc_out_mean, axis=0).mean(0)
             else:
                 fc_out_mean = -1
-            save_pickle(save_dir + '/output_mean.plk', [out_mean,fc_out_mean])
+            save_pickle(save_dir + '/output_mean.plk', [out_mean, fc_out_mean])
         else:
             out_mean = load_pickle(save_dir + '/output_mean.plk')[0]
 
@@ -478,20 +506,23 @@ def extract_feature_tune(train_loader, val_loader, model, tag='best'):
             # compute output
             outputs, _ = model(inputs, True)
             outputs = outputs.cpu().data.numpy()
-            for out,label in zip(outputs, labels):
+            for out, label in zip(outputs, labels):
                 output_dict[label.item()].append(out)
         all_info = [out_mean, output_dict]
         save_pickle(save_dir + '/output_tune.plk', all_info)
         return all_info
 
+
 def get_dataloader(split, aug=False, shuffle=True, out_name=False, sample=None):
 
     # sample: iter, way, shot, query
     if aug:
-        transform = datasets.with_augment(84, disable_random_resize=args.disable_random_resize, jitter=args.jitter)
+        transform = datasets.with_augment(
+            84, disable_random_resize=args.disable_random_resize, jitter=args.jitter)
     else:
         transform = datasets.without_augment(84, enlarge=args.enlarge)
-    sets = datasets.DatasetFolder(args.data, args.split_dir, split, transform, out_name=out_name)
+    sets = datasets.DatasetFolder(
+        args.data, args.split_dir, split, transform, out_name=out_name)
     if sample is not None:
         sampler = datasets.CategoriesSampler(sets.labels, *sample)
         loader = torch.utils.data.DataLoader(sets, batch_sampler=sampler,
@@ -500,7 +531,6 @@ def get_dataloader(split, aug=False, shuffle=True, out_name=False, sample=None):
         loader = torch.utils.data.DataLoader(sets, batch_size=args.batch_size, shuffle=shuffle,
                                              num_workers=args.workers, pin_memory=True)
     return loader
-
 
 
 def warp_tqdm(data_loader):
@@ -527,7 +557,8 @@ def load_checkpoint(model, type='best'):
     elif type == 'last':
         checkpoint = torch.load('{}/checkpoint.pth.tar'.format(args.save_path))
     else:
-        assert False, 'type should be in [best, or last], but got {}'.format(type)
+        assert False, 'type should be in [best, or last], but got {}'.format(
+            type)
     model.load_state_dict(checkpoint['state_dict'])
 
 
@@ -549,36 +580,42 @@ def meta_evaluate(data, train_mean, shot, norm='UN', train_feat=None):
     lap_list = []
     jem_list = []
     for _ in warp_tqdm(range(args.meta_test_iter)):
-        train_data, test_data, train_label, test_label = sample_case(data, shot)
+        train_data, test_data, train_label, test_label = sample_case(
+            data, shot)
         acc = jem_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
-                                norm_type=norm, train_feat=train_feat)
+                                    norm_type=norm, train_feat=train_feat)
         jem_list.append(acc)
         acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
                                 norm_type=norm)
         lap_list.append(acc)
         acc = finetune_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
-                                norm_type=norm)
+                                         norm_type=norm)
         ft_list.append(acc)
     ft_mean, ft_conf = compute_confidence_interval(ft_list)
     lap_mean, lap_conf = compute_confidence_interval(lap_list)
     jem_mean, jem_conf = compute_confidence_interval(jem_list)
     return ft_mean, ft_conf, lap_mean, lap_conf, jem_mean, jem_conf
 
+
 def meta_evaluate_tune(data, train_mean, shot):
     cl2n_list = []
     for _ in warp_tqdm(range(args.meta_val_iter)):
-        train_data, test_data, train_label, test_label = sample_case(data, shot)
+        train_data, test_data, train_label, test_label = sample_case(
+            data, shot)
         acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
                                 norm_type='CL2N')
         cl2n_list.append(acc)
     cl2n_mean, cl2n_conf = compute_confidence_interval(cl2n_list)
     return cl2n_mean, cl2n_conf
 
+
 def tune_lambda(train_loader, model, log):
-    val_loader = get_dataloader('val', aug=False, shuffle=False, out_name=False)
+    val_loader = get_dataloader(
+        'val', aug=False, shuffle=False, out_name=False)
     load_checkpoint(model, 'best')
 
-    out_mean, out_dict = extract_feature_tune(train_loader, val_loader, model, tag='best')
+    out_mean, out_dict = extract_feature_tune(
+        train_loader, val_loader, model, tag='best')
 
     acc_val_list_1 = []
     acc_val_list_5 = []
@@ -596,10 +633,10 @@ def tune_lambda(train_loader, model, log):
 
         print(
             'validation lmd={:0.2f}: Best\nfeature\tCL2N\n{}\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f}))'.format(args.lmd,
-            'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
+                                                                                                          'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
         log.info(
             'validation lmd={:0.2f}: Best\nfeature\tCL2N\n{}\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f}))'.format(args.lmd,
-            'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
+                                                                                                          'GVP 1Shot', *accuracy_info_shot1, 'GVP_5Shot', *accuracy_info_shot5))
 
     acc_val_list_1 = np.asarray(acc_val_list_1)
     acc_val_list_5 = np.asarray(acc_val_list_5)
@@ -608,10 +645,13 @@ def tune_lambda(train_loader, model, log):
     best_acc_5 = acc_val_list_5.max()
     best_lmd_5 = lmd_list[acc_val_list_5.argmax()]
 
-    print('Best lambda on validation:\n{:0.2f} with 1 shot acc {:.4f}\n{:0.2f} with 5 shot acc {:.4f}'.format(best_lmd_1, best_acc_1,best_lmd_5, best_acc_5))
-    log.info('Best lambda on validation:\n{:0.2f} with 1 shot acc {:.4f}\n{:0.2f} with 5 shot acc {:.4f}'.format(best_lmd_1, best_acc_1,best_lmd_5, best_acc_5))
+    print('Best lambda on validation:\n{:0.2f} with 1 shot acc {:.4f}\n{:0.2f} with 5 shot acc {:.4f}'.format(
+        best_lmd_1, best_acc_1, best_lmd_5, best_acc_5))
+    log.info('Best lambda on validation:\n{:0.2f} with 1 shot acc {:.4f}\n{:0.2f} with 5 shot acc {:.4f}'.format(
+        best_lmd_1, best_acc_1, best_lmd_5, best_acc_5))
 
     return best_lmd_1, best_lmd_5
+
 
 def lshot_prediction(args, knn, lmd, X, unary, support_label, test_label):
 
@@ -621,6 +661,7 @@ def lshot_prediction(args, knn, lmd, X, unary, support_label, test_label):
     acc, _ = get_accuracy(test_label, out)
     return acc
 
+
 class EntropyLoss(nn.Module):
     def __init__(self):
         super(EntropyLoss, self).__init__()
@@ -629,6 +670,7 @@ class EntropyLoss(nn.Module):
         b = F.softmax(x, dim=1) * F.log_softmax(x, dim=1)
         b = -1.0 * b.sum(dim=1)
         return b.mean()
+
 
 def jem_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N', train_feat=None):
     # compute normalization
@@ -643,21 +685,25 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
 
     # rectified prototype or note
     if args.proto_rect:
-        eta = gallery.mean(0) - query.mean(0) # shift
-        query = query + eta[np.newaxis,:]
-        query_aug = np.concatenate((gallery, query),axis=0)
-        gallery_ = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1)
+        eta = gallery.mean(0) - query.mean(0)  # shift
+        query = query + eta[np.newaxis, :]
+        query_aug = np.concatenate((gallery, query), axis=0)
+        gallery_ = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)
         gallery_ = torch.from_numpy(gallery_)
         query_aug = torch.from_numpy(query_aug)
         distance = get_metric('cosine')(gallery_, query_aug)
         predict = torch.argmin(distance, dim=1)
-        cos_sim = F.cosine_similarity(query_aug[:, None, :], gallery_[None, :, :], dim=2)
+        cos_sim = F.cosine_similarity(
+            query_aug[:, None, :], gallery_[None, :, :], dim=2)
         cos_sim = 10 * cos_sim
-        W = F.softmax(cos_sim,dim=1)
-        gallery_list = [(W[predict==i,i].unsqueeze(1)*query_aug[predict==i]).mean(0,keepdim=True) for i in predict.unique()]
-        gallery = torch.cat(gallery_list,dim=0).numpy()
+        W = F.softmax(cos_sim, dim=1)
+        gallery_list = [(W[predict == i, i].unsqueeze(
+            1)*query_aug[predict == i]).mean(0, keepdim=True) for i in predict.unique()]
+        gallery = torch.cat(gallery_list, dim=0).numpy()
     else:
-        gallery = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1) # (5, 1, D)
+        gallery = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)  # (5, 1, D)
 
     feat_dim = gallery.shape[-1]
     n_classes = args.meta_val_way
@@ -669,7 +715,7 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
         if c in global2task.keys():
             continue
         global2task[c] = idx
-        idx += 1 
+        idx += 1
 
     task2global = {v: k for k, v in global2task.items()}
     support_label = [global2task[v] for v in support_label]
@@ -682,7 +728,7 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     test_label = torch.tensor(test_label, device='cuda:0')
     # TODO: Bias or not
     fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
-    # init fc weight = prototype 
+    # init fc weight = prototype
     # FIXME: Current implementation is wrong, need to sort gallery in class id order
     fc.weight.data = copy.deepcopy(gallery.reshape(n_classes, feat_dim))
     ce_criterion = nn.CrossEntropyLoss()
@@ -690,7 +736,7 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     optimizer = torch.optim.Adam(fc.parameters())
     replay_buffer = SampleBuffer(train_feat=train_feat)
     # pos_samples = torch.cat([gallery, query], dim=0)
-    pos_samples = gallery 
+    pos_samples = gallery
 
     # hyperparam
     n_steps = CLASSIFIER_UPDATE_STEPS
@@ -698,18 +744,19 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     beta = BETA_WEIGHT
 
     fc.train()
-    norm_kwargs = {'norm_type': norm_type} 
+    norm_kwargs = {'norm_type': norm_type}
     if norm_type == 'CL2N':
         norm_kwargs['mean'] = torch.tensor(train_mean, device='cuda:0')
 
     for step in range(n_steps):
         pos_sample = pos_samples
-        # cross-entropy loss 
+        # cross-entropy loss
         predict = fc(gallery)
 
         # compute energy
         # negative sample
-        neg_samples, neg_id = sample_ebm(fc, replay_buffer, pos_sample, norm_kwargs=norm_kwargs)
+        neg_samples, neg_id = sample_ebm(
+            fc, replay_buffer, pos_sample, norm_kwargs=norm_kwargs)
         neg_energy = (-1.0 * torch.logsumexp(fc(neg_samples), 1)).mean()
         # positive sample
         pos_out = fc(pos_sample)
@@ -720,20 +767,118 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
         ce_loss = ce_criterion(predict, support_label)
         # entropy_loss = entropy_criterion(pos_out)
 
-        loss = ce_loss + beta * energy_loss # + entropy_loss
-        loss.backward() 
+        loss = ce_loss + beta * energy_loss  # + entropy_loss
+        loss.backward()
 
         # clip_grad(fc.parameters(), optimizer)
-        optimizer.step() 
-        fc.zero_grad() 
+        optimizer.step()
+        fc.zero_grad()
 
         replay_buffer.push(neg_samples, neg_id)
 
     query_predict = fc(query).argmax(dim=-1)
     # acc = (query_predict == test_label)/test_label.sum()
-    acc, _ = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
+    acc, _ = get_accuracy(query_predict.cpu().numpy(),
+                          test_label.cpu().numpy())
 
-    return acc 
+    return acc
+
+
+def vera_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N', train_feat=None):
+    # compute normalization
+    if norm_type == 'CL2N':
+        gallery = gallery - train_mean
+        gallery = gallery / LA.norm(gallery, 2, 1)[:, None]
+        query = query - train_mean
+        query = query / LA.norm(query, 2, 1)[:, None]
+    elif norm_type == 'L2N':
+        gallery = gallery / LA.norm(gallery, 2, 1)[:, None]
+        query = query / LA.norm(query, 2, 1)[:, None]
+
+    # rectified prototype or note
+    if args.proto_rect:
+        eta = gallery.mean(0) - query.mean(0)  # shift
+        query = query + eta[np.newaxis, :]
+        query_aug = np.concatenate((gallery, query), axis=0)
+        gallery_ = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)
+        gallery_ = torch.from_numpy(gallery_)
+        query_aug = torch.from_numpy(query_aug)
+        distance = get_metric('cosine')(gallery_, query_aug)
+        predict = torch.argmin(distance, dim=1)
+        cos_sim = F.cosine_similarity(
+            query_aug[:, None, :], gallery_[None, :, :], dim=2)
+        cos_sim = 10 * cos_sim
+        W = F.softmax(cos_sim, dim=1)
+        gallery_list = [(W[predict == i, i].unsqueeze(
+            1)*query_aug[predict == i]).mean(0, keepdim=True) for i in predict.unique()]
+        gallery = torch.cat(gallery_list, dim=0).numpy()
+    else:
+        gallery = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)  # (5, 1, D)
+
+    feat_dim = gallery.shape[-1]
+    n_classes = args.meta_val_way
+
+    # map global class to task class (i.e. 64 class to 5 class)
+    global2task = {}
+    idx = 0
+    for c in support_label:
+        if c in global2task.keys():
+            continue
+        global2task[c] = idx
+        idx += 1
+
+    support_label = [global2task[v] for v in support_label]
+    test_label = [global2task[v] for v in test_label]
+
+    # prepare for training linear
+    gallery = torch.tensor(gallery, device='cuda:0')
+    query = torch.tensor(query, device='cuda:0')
+    support_label = torch.tensor(support_label, device='cuda:0')
+    test_label = torch.tensor(test_label, device='cuda:0')
+
+    # hyper:
+    n_steps = CLASSIFIER_UPDATE_STEPS
+    arguments = {'batch_size': gallery.shape[0],
+                 'cd_training': True,
+                 'gen_training': True,
+                 'p_control': 0,
+                 'n_control': 0,
+                 'pg_control': 0.1,
+                 'energy_weight': 1,
+                 'ent_weight': 0.0001,
+                 'max_sigma': 0.3,
+                 'min_sigma': 0.01,
+                 'noise_dim': 128,
+                 'post_lr': 3e-5}
+
+    # setup
+    fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
+    fc.weight.data = copy.deepcopy(gallery.reshape(n_classes, feat_dim))
+    fc = JEM(fc)
+    mlp = MLPNetwork(feat_dim, feat_dim)
+    generator = VERAGenerator(
+        mlp, arguments['noise_dim'], arguments['post_lr'])
+
+    ce_criterion = nn.CrossEntropyLoss()
+    e_optimizer = torch.optim.Adam(fc.parameters())
+    g_optimizer = torch.optim.Adam(generator.parameters())
+
+    fc.train()
+    generator.train()
+
+    for _ in range(n_steps):
+        train_vera(fc, e_optimizer, generator, g_optimizer,
+                   gallery, support_label, arguments)
+
+    query_predict = fc(query).argmax(dim=-1)
+    # acc = (query_predict == test_label)/test_label.sum()
+    acc, _ = get_accuracy(query_predict.cpu().numpy(),
+                          test_label.cpu().numpy())
+
+    return acc
+
 
 def finetune_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
     # compute normalization
@@ -748,21 +893,25 @@ def finetune_metric_class_type(gallery, query, support_label, test_label, shot, 
 
     # rectified prototype or note
     if args.proto_rect:
-        eta = gallery.mean(0) - query.mean(0) # shift
-        query = query + eta[np.newaxis,:]
-        query_aug = np.concatenate((gallery, query),axis=0)
-        gallery_ = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1)
+        eta = gallery.mean(0) - query.mean(0)  # shift
+        query = query + eta[np.newaxis, :]
+        query_aug = np.concatenate((gallery, query), axis=0)
+        gallery_ = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)
         gallery_ = torch.from_numpy(gallery_)
         query_aug = torch.from_numpy(query_aug)
         distance = get_metric('cosine')(gallery_, query_aug)
         predict = torch.argmin(distance, dim=1)
-        cos_sim = F.cosine_similarity(query_aug[:, None, :], gallery_[None, :, :], dim=2)
+        cos_sim = F.cosine_similarity(
+            query_aug[:, None, :], gallery_[None, :, :], dim=2)
         cos_sim = 10 * cos_sim
-        W = F.softmax(cos_sim,dim=1)
-        gallery_list = [(W[predict==i,i].unsqueeze(1)*query_aug[predict==i]).mean(0,keepdim=True) for i in predict.unique()]
-        gallery = torch.cat(gallery_list,dim=0).numpy()
+        W = F.softmax(cos_sim, dim=1)
+        gallery_list = [(W[predict == i, i].unsqueeze(
+            1)*query_aug[predict == i]).mean(0, keepdim=True) for i in predict.unique()]
+        gallery = torch.cat(gallery_list, dim=0).numpy()
     else:
-        gallery = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1) # (5, 1, D)
+        gallery = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)  # (5, 1, D)
 
     feat_dim = gallery.shape[-1]
     n_classes = args.meta_val_way
@@ -774,7 +923,7 @@ def finetune_metric_class_type(gallery, query, support_label, test_label, shot, 
         if c in global2task.keys():
             continue
         global2task[c] = idx
-        idx += 1 
+        idx += 1
 
     task2global = {v: k for k, v in global2task.items()}
     support_label = [global2task[v] for v in support_label]
@@ -787,33 +936,35 @@ def finetune_metric_class_type(gallery, query, support_label, test_label, shot, 
     test_label = torch.tensor(test_label, device='cuda:0')
     # TODO: Bias or not
     fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
-    # init fc weight = prototype 
+    # init fc weight = prototype
     # FIXME: Current implementation is wrong, need to sort gallery in class id order
     fc.weight.data = gallery.reshape(n_classes, feat_dim)
     ce_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
 
     # hyperparam
-    n_steps = CLASSIFIER_UPDATE_STEPS 
+    n_steps = CLASSIFIER_UPDATE_STEPS
 
     fc.train()
     for step in range(n_steps):
-        # cross-entropy loss 
+        # cross-entropy loss
         predict = fc(gallery)
         ce_loss = ce_criterion(predict, support_label)
 
         loss = ce_loss
-        loss.backward() 
+        loss.backward()
 
         # clip_grad(fc.parameters(), optimizer)
-        optimizer.step() 
-        fc.zero_grad() 
+        optimizer.step()
+        fc.zero_grad()
 
     query_predict = fc(query).argmax(dim=-1)
     # acc = (query_predict == test_label)/test_label.sum()
-    acc, _ = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
+    acc, _ = get_accuracy(query_predict.cpu().numpy(),
+                          test_label.cpu().numpy())
 
-    return acc 
+    return acc
+
 
 def metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
     if norm_type == 'CL2N':
@@ -826,32 +977,37 @@ def metric_class_type(gallery, query, support_label, test_label, shot, train_mea
         query = query / LA.norm(query, 2, 1)[:, None]
 
     if args.proto_rect:
-        eta = gallery.mean(0) - query.mean(0) # shift
-        query = query + eta[np.newaxis,:]
-        query_aug = np.concatenate((gallery, query),axis=0)
-        gallery_ = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1)
+        eta = gallery.mean(0) - query.mean(0)  # shift
+        query = query + eta[np.newaxis, :]
+        query_aug = np.concatenate((gallery, query), axis=0)
+        gallery_ = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)
         gallery_ = torch.from_numpy(gallery_)
         query_aug = torch.from_numpy(query_aug)
         distance = get_metric('cosine')(gallery_, query_aug)
         predict = torch.argmin(distance, dim=1)
-        cos_sim = F.cosine_similarity(query_aug[:, None, :], gallery_[None, :, :], dim=2)
+        cos_sim = F.cosine_similarity(
+            query_aug[:, None, :], gallery_[None, :, :], dim=2)
         cos_sim = 10 * cos_sim
-        W = F.softmax(cos_sim,dim=1)
-        gallery_list = [(W[predict==i,i].unsqueeze(1)*query_aug[predict==i]).mean(0,keepdim=True) for i in predict.unique()]
-        gallery = torch.cat(gallery_list,dim=0).numpy()
+        W = F.softmax(cos_sim, dim=1)
+        gallery_list = [(W[predict == i, i].unsqueeze(
+            1)*query_aug[predict == i]).mean(0, keepdim=True) for i in predict.unique()]
+        gallery = torch.cat(gallery_list, dim=0).numpy()
     else:
-        gallery = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1)
+        gallery = gallery.reshape(
+            args.meta_val_way, shot, gallery.shape[-1]).mean(1)
 
     support_label = support_label[::shot]
     subtract = gallery[:, None, :] - query
     distance = LA.norm(subtract, 2, axis=-1)
     test_label = np.array(test_label)
     # with LapLacianShot
-    if args.lshot and args.lmd!=0:
+    if args.lshot and args.lmd != 0:
         knn = args.knn
         lmd = args.lmd
         unary = distance.transpose() ** 2
-        acc = lshot_prediction(args, knn, lmd, query, unary, support_label, test_label)
+        acc = lshot_prediction(args, knn, lmd, query,
+                               unary, support_label, test_label)
     else:
         idx = np.argpartition(distance, args.num_NN, axis=0)[:args.num_NN]
         nearest_samples = np.take(support_label, idx)
@@ -873,6 +1029,7 @@ def create_affinity(X, knn):
     W = sparse.csc_matrix((data, (row, col)), shape=(N, N), dtype=np.float)
     return W
 
+
 def get_accuracy(L1, L2):
     # Since the labels may be different we utilize the Hungarian method to ensure the map of
     # the original ground truth labeling with the returned labels from our laplacian update which is similar to clustering.
@@ -888,7 +1045,8 @@ def get_accuracy(L1, L2):
     G = np.zeros((nClass, nClass))
     for i in range(nClass1):
         for j in range(nClass2):
-            G[i][j] = np.nonzero((L1 == Label1[i]) * (L2 == Label2[j]))[0].__len__()
+            G[i][j] = np.nonzero((L1 == Label1[i]) *
+                                 (L2 == Label2[j]))[0].__len__()
 
     c = linear_sum_assignment(-G.T)[1]
     newL2 = np.zeros(L2.__len__())
@@ -897,7 +1055,8 @@ def get_accuracy(L1, L2):
             if len(Label1) > c[i]:
                 newL2[j] = Label1[c[i]]
 
-    return accuracy_score(L1, newL2),newL2
+    return accuracy_score(L1, newL2), newL2
+
 
 def sample_case(ld_dict, shot):
     # Sample meta task
@@ -922,35 +1081,45 @@ def sample_case(ld_dict, shot):
 
 
 def do_extract_and_evaluate(model, log):
-    train_loader = get_dataloader('train', aug=False, shuffle=False, out_name=False)
-    if args.tune_lmd :
+    train_loader = get_dataloader(
+        'train', aug=False, shuffle=False, out_name=False)
+    if args.tune_lmd:
         print('Tuning Lambda')
         best_lmd_1, best_lmd_5 = tune_lambda(train_loader, model, log)
     else:
         best_lmd_1 = best_lmd_5 = args.lmd
-    val_loader = get_dataloader('test', aug=False, shuffle=False, out_name=False)
+    val_loader = get_dataloader(
+        'test', aug=False, shuffle=False, out_name=False)
     print(' Proto-rectification = {} in Evaluation'.format(args.proto_rect))
-    ## With the last model trained on source dataset
+    # With the last model trained on source dataset
     load_checkpoint(model, 'last')
-    out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(train_loader, val_loader, model, 'last')
+    out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(
+        train_loader, val_loader, model, 'last')
     # train_feat = extract_all_features(train_loader, val_loader, model, 'last')
     train_feat = None
     norm1 = 'UN'
     norm2 = 'L2N'
     norm3 = 'CL2N'
-    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1, train_feat=train_feat)
-    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2, train_feat=train_feat)
-    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3, train_feat=train_feat)
+    accuracy_info_shot1_norm1 = meta_evaluate(
+        out_dict, out_mean, 1, norm1, train_feat=train_feat)
+    accuracy_info_shot1_norm2 = meta_evaluate(
+        out_dict, out_mean, 1, norm2, train_feat=train_feat)
+    accuracy_info_shot1_norm3 = meta_evaluate(
+        out_dict, out_mean, 1, norm3, train_feat=train_feat)
 
     print(
         'Meta Test: LAST\nfeature\tFT\tLAP\tJEM\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
             'GVP ' + str(norm1), *accuracy_info_shot1_norm1, 'GVP ' + str(norm2), *accuracy_info_shot1_norm2, 'GVP ' + str(norm3), *accuracy_info_shot1_norm3))
-    ## With the best model trained on source dataset
+    # With the best model trained on source dataset
     load_checkpoint(model, 'best')
-    out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(train_loader, val_loader, model, 'best')
-    accuracy_info_shot1_norm1 = meta_evaluate(out_dict, out_mean, 1, norm1, train_feat=train_feat)
-    accuracy_info_shot1_norm2 = meta_evaluate(out_dict, out_mean, 1, norm2, train_feat=train_feat)
-    accuracy_info_shot1_norm3 = meta_evaluate(out_dict, out_mean, 1, norm3, train_feat=train_feat)
+    out_mean, fc_out_mean, out_dict, fc_out_dict = extract_feature(
+        train_loader, val_loader, model, 'best')
+    accuracy_info_shot1_norm1 = meta_evaluate(
+        out_dict, out_mean, 1, norm1, train_feat=train_feat)
+    accuracy_info_shot1_norm2 = meta_evaluate(
+        out_dict, out_mean, 1, norm2, train_feat=train_feat)
+    accuracy_info_shot1_norm3 = meta_evaluate(
+        out_dict, out_mean, 1, norm3, train_feat=train_feat)
     print(
         'Meta Test: BEST\nfeature\tFT\tLAP\tJEM\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
             'GVP ' + str(norm1), *accuracy_info_shot1_norm1, 'GVP ' + str(norm2), *accuracy_info_shot1_norm2, 'GVP ' + str(norm3), *accuracy_info_shot1_norm3))

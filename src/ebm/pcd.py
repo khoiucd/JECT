@@ -1,8 +1,9 @@
 import torch
 import random
-import numpy as np 
+import numpy as np
 from numpy import linalg as LA
 from torch.nn import functional as F
+
 
 class SampleBuffer:
     def __init__(self, max_samples=10000, train_feat=None, n_classes=5, p=0.95):
@@ -46,23 +47,25 @@ class SampleBuffer:
             idx = np.random.choice(self.train_feat.shape[0], n_samples)
             return torch.tensor(self.train_feat[idx], device=data_device)
 
-
     def sample_buffer(self, pos_data, norm_kwargs=None):
         batch_size = pos_data.size(0)
         device = pos_data.device
 
         if len(self.buffer) < 1:
             return (
-                data_normalize(self.init_sample(pos_data.shape, device), norm_kwargs),
+                data_normalize(self.init_sample(
+                    pos_data.shape, device), norm_kwargs),
                 torch.randint(0, self.n_classes, (batch_size,), device=device),
             )
 
         n_replay = (np.random.rand(batch_size) < self.p).sum()
-        n_replay = max(n_replay, 1) # avoid error when n_replay = 0
-        
+        n_replay = max(n_replay, 1)  # avoid error when n_replay = 0
+
         replay_sample, replay_id = self.get(n_replay, device=device)
-        random_sample = data_normalize(self.init_sample((batch_size - n_replay, pos_data.size(1)), data_device=device), norm_kwargs)
-        random_id = torch.randint(0, self.n_classes, (batch_size - n_replay,), device=device)
+        random_sample = data_normalize(self.init_sample(
+            (batch_size - n_replay, pos_data.size(1)), data_device=device), norm_kwargs)
+        random_id = torch.randint(
+            0, self.n_classes, (batch_size - n_replay,), device=device)
 
         return (
             torch.cat([replay_sample, random_sample], 0),
@@ -82,28 +85,31 @@ def sample_data(loader):
 
             yield next(loader_iter)
 
+
 def data_normalize(inp, kwargs):
     if kwargs is None:
-        return inp 
-        
+        return inp
+
     norm_type = kwargs['norm_type']
     if norm_type == 'L2N':
         return F.normalize(inp, p=2, dim=1)
     elif norm_type == 'CL2N':
         mean = kwargs['mean']
         return F.normalize(inp-mean, p=2, dim=1)
-    else: #unnormalize
+    else:  # unnormalize
         return inp
+
 
 def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=10, norm_kwargs=None):
     data_shape = pos_data.shape
     batch_size = data_shape[0]
 
-    neg_data, neg_id = replay_buffer.sample_buffer(pos_data, norm_kwargs=norm_kwargs)
-    neg_data.requires_grad = True 
+    neg_data, neg_id = replay_buffer.sample_buffer(
+        pos_data, norm_kwargs=norm_kwargs)
+    neg_data.requires_grad = True
 
     requires_grad(model.parameters(), False)
-    model.eval() 
+    model.eval()
 
     for k in range(sample_step):
         noise = torch.randn(pos_data.shape, device=pos_data.device)
@@ -112,7 +118,7 @@ def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=10, 
 
         neg_energy = -1.0 * torch.logsumexp(model(neg_data), 1)
         neg_energy.sum().backward()
-        
+
         # TODO: update hyperparam
         neg_data.grad.data.clamp_(-1, 1)
         neg_data.data.add_(-step_size, neg_data.grad.data)
@@ -129,6 +135,7 @@ def sample_ebm(model, replay_buffer, pos_data, step_size=0.001, sample_step=10, 
     model.zero_grad()
 
     return neg_data, neg_id
+
 
 def requires_grad(parameters, flag=True):
     for p in parameters:
@@ -149,4 +156,34 @@ def clip_grad(parameters, optimizer):
                 _, beta2 = group['betas']
 
                 bound = 3 * torch.sqrt(exp_avg_sq / (1 - beta2 ** step)) + 0.1
-                p.grad.data.copy_(torch.max(torch.min(p.grad.data, bound), -bound))
+                p.grad.data.copy_(
+                    torch.max(torch.min(p.grad.data, bound), -bound))
+
+
+def train_pgd(model, pos_samples):
+    # # cross-entropy loss
+    # predict = fc(gallery)
+
+    # # compute energy
+    # # negative sample
+    # neg_samples, neg_id = sample_ebm(
+    #     fc, replay_buffer, pos_samples, norm_kwargs=norm_kwargs)
+    # neg_energy = (-1.0 * torch.logsumexp(fc(neg_samples), 1)).mean()
+    # # positive sample
+    # pos_out = fc(pos_samples)
+    # pos_energy = (-1.0 * torch.logsumexp(pos_out, 1)).mean()
+
+    # # compute loss
+    # energy_loss = (pos_energy - neg_energy)
+    # ce_loss = ce_criterion(predict, support_label)
+    # # entropy_loss = entropy_criterion(pos_out)
+
+    # loss = ce_loss + beta * energy_loss  # + entropy_loss
+    # loss.backward()
+
+    # # clip_grad(fc.parameters(), optimizer)
+    # optimizer.step()
+    # fc.zero_grad()
+
+    # replay_buffer.push(neg_samples, neg_id)
+    pass

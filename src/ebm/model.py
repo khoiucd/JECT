@@ -10,24 +10,52 @@ import numpy as np
 from . import utils
 
 
+class JEM(nn.Module):
+    """
+    JEM model.
+    """
+
+    def __init__(self, logp_net):
+        super().__init__()
+        self.logp_net = logp_net
+
+    def forward(self, x, return_logits=False):
+        """
+        Forward pass.
+        """
+        logits = self.logp_net(x)
+        if return_logits:
+            return logits.logsumexp(1), logits
+        else:
+            return logits.logsumexp(1)
+
+    def classify(self, x):
+        """
+        Use model as classifier.
+        """
+        return self.logp_net(x)
+
+
 class MLPNetwork(nn.Module):
     def __init__(self, inp_dim, out_dim, hidden_dim=256, n_layer=2):
         self.inp_dim = inp_dim
         self.out_dim = out_dim
         self.hidden_dim = hidden_dim
-        
+
         layers = []
         for i in range(n_layer):
             if i == 0:
                 layers.append(nn.Linear(inp_dim, hidden_dim))
                 layers.append(nn.ReLU())
             elif i == (n_layer - 1):
+                # since the last layer of classifier is fed through a ReLU, we also add relu in the last layer
                 layers.append(nn.Linear(hidden_dim, out_dim))
+                layers.append(nn.ReLU())
             else:
                 layers.append(nn.Linear(hidden_dim, hidden_dim))
                 layers.append(nn.ReLU())
         self.model = nn.Sequential(*layers)
-        
+
     def forward(self, x):
         return self.model(x)
 
@@ -36,12 +64,14 @@ class VERAHMCGenerator(nn.Module):
     """
     VERA Generator with HMC estimator.
     """
+
     def __init__(self, g, noise_dim, mcmc_lr=.02):
         super().__init__()
         self.g = g
         self.logsigma = nn.Parameter((torch.ones(1, ) * .01).log())
         self.noise_dim = noise_dim
-        self.stepsize = nn.Parameter(torch.tensor(1. / noise_dim), requires_grad=False)
+        self.stepsize = nn.Parameter(torch.tensor(
+            1. / noise_dim), requires_grad=False)
         self.mcmc_lr = mcmc_lr
         self.ar = 0.
 
@@ -92,7 +122,8 @@ class VERAHMCGenerator(nn.Module):
         mean_output_summed = torch.zeros_like(x)
         mean_output = self.g(h_given_x)
         for cnt in range(num_samples_posterior):
-            mean_output_summed = mean_output_summed + mean_output[cnt * x.size(0):(cnt + 1) * x.size(0)]
+            mean_output_summed = mean_output_summed + \
+                mean_output[cnt * x.size(0):(cnt + 1) * x.size(0)]
         mean_output_summed /= num_samples_posterior
 
         c = ((x - mean_output_summed) / self.logsigma.exp() ** 2).detach()
@@ -116,10 +147,13 @@ class VERAGenerator(VERAHMCGenerator):
     """
     VERA generator.
     """
+
     def __init__(self, g, noise_dim, post_lr=.001, init_post_logsigma=.1):
         super().__init__(g, noise_dim, post_lr)
-        self.post_logsigma = nn.Parameter((torch.ones(noise_dim,) * init_post_logsigma).log())
-        self.post_optimizer = torch.optim.Adam([self.post_logsigma], lr=post_lr)
+        self.post_logsigma = nn.Parameter(
+            (torch.ones(noise_dim,) * init_post_logsigma).log())
+        self.post_optimizer = torch.optim.Adam(
+            [self.post_logsigma], lr=post_lr)
 
     def entropy_obj(self, x, h, num_samples_posterior=20, return_score=False, learn_post_sigma=True):
         """
@@ -130,20 +164,26 @@ class VERAGenerator(VERAHMCGenerator):
         if len(x.size()) == 4:
             inf_logprob = inf_dist.log_prob(h_given_x).sum(2)
             xr = x[None].repeat(num_samples_posterior, 1, 1, 1, 1)
-            xr = xr.view(x.size(0) * num_samples_posterior, x.size(1), x.size(2), x.size(3))
-            logq, mean_output = self.logq_joint(xr, h_given_x.view(-1, h.size(1)), return_mu=True)
-            mean_output = mean_output.view(num_samples_posterior, x.size(0), x.size(1), x.size(2), x.size(3))
+            xr = xr.view(x.size(0) * num_samples_posterior,
+                         x.size(1), x.size(2), x.size(3))
+            logq, mean_output = self.logq_joint(
+                xr, h_given_x.view(-1, h.size(1)), return_mu=True)
+            mean_output = mean_output.view(
+                num_samples_posterior, x.size(0), x.size(1), x.size(2), x.size(3))
             logq = logq.view(num_samples_posterior, x.size(0))
             w = (logq - inf_logprob).softmax(dim=0)
             fvals = (x[None] - mean_output) / (self.logsigma.exp() ** 2)
-            weighted_fvals = (fvals * w[:, :, None, None, None]).sum(0).detach()
+            weighted_fvals = (
+                fvals * w[:, :, None, None, None]).sum(0).detach()
             c = weighted_fvals
         else:
             inf_logprob = inf_dist.log_prob(h_given_x).sum(2)
             xr = x[None].repeat(num_samples_posterior, 1, 1)
             xr = xr.view(x.size(0) * num_samples_posterior, x.size(1))
-            logq, mean_output = self.logq_joint(xr, h_given_x.view(-1, h.size(1)), return_mu=True)
-            mean_output = mean_output.view(num_samples_posterior, x.size(0), x.size(1))
+            logq, mean_output = self.logq_joint(
+                xr, h_given_x.view(-1, h.size(1)), return_mu=True)
+            mean_output = mean_output.view(
+                num_samples_posterior, x.size(0), x.size(1))
             logq = logq.view(num_samples_posterior, x.size(0))
             w = (logq - inf_logprob).softmax(dim=0)
             fvals = (x[None] - mean_output) / (self.logsigma.exp() ** 2)
