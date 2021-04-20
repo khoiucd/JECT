@@ -38,6 +38,7 @@ class JEM(nn.Module):
 
 class MLPNetwork(nn.Module):
     def __init__(self, inp_dim, out_dim, hidden_dim=256, n_layer=2):
+        super(MLPNetwork, self).__init__()
         self.inp_dim = inp_dim
         self.out_dim = out_dim
         self.hidden_dim = hidden_dim

@@ -21,6 +21,11 @@ def train_vera(model, e_optimizer, generator, g_optimizer, x_d, y_d, args):
     min_sigma = args['min_sigma']
 
     x_g, h_g = generator.sample(batch_size, requires_grad=True)
+    if args['norm_type'] == 'L2N':
+        x_g = F.normalize(x_g, p=2, dim=1)
+    elif args['norm_type'] == 'CL2N':
+        x_g = F.normalize(x_g - args['train_mean'], p=2, dim=1)
+
     x_d.requires_grad_()
 
     if cd_training:  # use contrastive divergence objective
@@ -52,9 +57,8 @@ def train_vera(model, e_optimizer, generator, g_optimizer, x_d, y_d, args):
 
     # Train Generator
     if gen_training:
-        lg = model(x_g).squeeeze()
+        lg = model(x_g).squeeze()
         grad = torch.autograd.grad(lg.sum(), x_g, retain_graph=True)[0]
-        # ebm_gn = grad.norm(2, 1).mean()
 
         if ent_weight != 0:
             entropy_obj, _ = generator.entropy_obj(x_g, h_g)

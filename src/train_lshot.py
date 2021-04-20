@@ -582,7 +582,7 @@ def meta_evaluate(data, train_mean, shot, norm='UN', train_feat=None):
     for _ in warp_tqdm(range(args.meta_test_iter)):
         train_data, test_data, train_label, test_label = sample_case(
             data, shot)
-        acc = jem_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
+        acc = vera_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
                                     norm_type=norm, train_feat=train_feat)
         jem_list.append(acc)
         acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
@@ -837,6 +837,7 @@ def vera_metric_class_type(gallery, query, support_label, test_label, shot, trai
     query = torch.tensor(query, device='cuda:0')
     support_label = torch.tensor(support_label, device='cuda:0')
     test_label = torch.tensor(test_label, device='cuda:0')
+    train_mean = torch.tensor(train_mean, device='cuda:0')
 
     # hyper:
     n_steps = CLASSIFIER_UPDATE_STEPS
@@ -846,24 +847,26 @@ def vera_metric_class_type(gallery, query, support_label, test_label, shot, trai
                  'p_control': 0,
                  'n_control': 0,
                  'pg_control': 0.1,
-                 'energy_weight': 1,
+                 'energy_weight': 0.1,
                  'ent_weight': 0.0001,
                  'max_sigma': 0.3,
-                 'min_sigma': 0.01,
-                 'noise_dim': 128,
-                 'post_lr': 3e-5}
+                 'min_sigma': 0.001,
+                 'noise_dim': 128, 
+                 'post_lr': 3e-5,
+                 'norm_type': norm_type,
+                 'train_mean': train_mean}
 
     # setup
     fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
     fc.weight.data = copy.deepcopy(gallery.reshape(n_classes, feat_dim))
-    fc = JEM(fc)
-    mlp = MLPNetwork(feat_dim, feat_dim)
+    fc = JEM(fc).to('cuda:0')
+    mlp = MLPNetwork(arguments['noise_dim'], feat_dim)
     generator = VERAGenerator(
-        mlp, arguments['noise_dim'], arguments['post_lr'])
+        mlp, arguments['noise_dim'], arguments['post_lr']).to('cuda:0')
 
     ce_criterion = nn.CrossEntropyLoss()
-    e_optimizer = torch.optim.Adam(fc.parameters())
-    g_optimizer = torch.optim.Adam(generator.parameters())
+    e_optimizer = torch.optim.Adam(fc.parameters(), 0.001)
+    g_optimizer = torch.optim.Adam(generator.parameters(), 0.005)
 
     fc.train()
     generator.train()
@@ -872,8 +875,8 @@ def vera_metric_class_type(gallery, query, support_label, test_label, shot, trai
         train_vera(fc, e_optimizer, generator, g_optimizer,
                    gallery, support_label, arguments)
 
-    query_predict = fc(query).argmax(dim=-1)
-    # acc = (query_predict == test_label)/test_label.sum()
+    fc.eval()
+    query_predict = fc.classify(query).argmax(dim=-1)
     acc, _ = get_accuracy(query_predict.cpu().numpy(),
                           test_label.cpu().numpy())
 
