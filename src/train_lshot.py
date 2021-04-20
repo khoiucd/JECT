@@ -253,7 +253,7 @@ def train_distil(train_loader, t_model, s_model, criterion, optimizer, epoch, sc
     end = time.time()
     tqdm_train_loader = warp_tqdm(train_loader)
 
-    kd_criterion = DistillKL(T=1) 
+    kd_criterion = DistillKL(T=4)
 
     for i, (input, target) in enumerate(tqdm_train_loader):
         if args.scheduler == 'cosine':

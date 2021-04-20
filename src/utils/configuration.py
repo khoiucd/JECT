@@ -40,7 +40,7 @@ def parser_args():
     parser.add_argument('--nesterov', action='store_true',
                         help='use nesterov for SGD, disable it in default')
     ### meta val setting
-    parser.add_argument('--meta-test-iter', type=int, default=10000,
+    parser.add_argument('--meta-test-iter', type=int, default=1000,
                         help='number of iterations for meta test')
     parser.add_argument('--meta-val-iter', type=int, default=500,
                         help='number of iterations for meta val')
