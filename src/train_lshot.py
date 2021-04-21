@@ -37,7 +37,7 @@ from utils.ebm import SampleBuffer, sample_ebm, clip_grad
 from utils.losses import DistillKL
 
 best_prec1 = -1
-CLASSIFIER_UPDATE_STEPS = 100 
+CLASSIFIER_UPDATE_STEPS = 100
 BETA_WEIGHT = 0.5
 
 
@@ -634,8 +634,10 @@ def load_pickle(file):
 def load_checkpoint(model, type='best'):
     if type == 'best':
         checkpoint = torch.load('{}/model_best.pth.tar'.format(args.save_path))
+        print("Load checkpoint from {}/model_best.pth.tar".format(args.save_path))
     elif type == 'last':
         checkpoint = torch.load('{}/checkpoint.pth.tar'.format(args.save_path))
+        print("Load checkpoint from {}/checkpoint.pth.tar".format(args.save_path))
     else:
         assert False, 'type should be in [best, or last], but got {}'.format(type)
     model.load_state_dict(checkpoint['state_dict'])
@@ -663,8 +665,8 @@ def meta_evaluate(data, train_mean, shot, norm='UN', train_feat=None):
         acc = jem_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
                                 norm_type=norm, train_feat=train_feat)
         jem_list.append(acc)
-        acc = metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
-                                norm_type=norm)
+        acc = distance_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
+                                norm_type=norm, metric_type='cosine')
         lap_list.append(acc)
         acc = finetune_metric_class_type(train_data, test_data, train_label, test_label, shot, train_mean=train_mean,
                                 norm_type=norm)
@@ -767,6 +769,7 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
         gallery_list = [(W[predict==i,i].unsqueeze(1)*query_aug[predict==i]).mean(0,keepdim=True) for i in predict.unique()]
         gallery = torch.cat(gallery_list,dim=0).numpy()
     else:
+        instance_gallery = copy.deepcopy(gallery)
         gallery = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1) # (5, 1, D)
 
     feat_dim = gallery.shape[-1]
@@ -786,21 +789,19 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
     test_label = [global2task[v] for v in test_label]
 
     # prepare for training linear
+    instance_gallery = torch.tensor(instance_gallery, device='cuda:0')
     gallery = torch.tensor(gallery, device='cuda:0')
     query = torch.tensor(query, device='cuda:0')
     support_label = torch.tensor(support_label, device='cuda:0')
     test_label = torch.tensor(test_label, device='cuda:0')
-    # TODO: Bias or not
+
     fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
-    # init fc weight = prototype 
-    # FIXME: Current implementation is wrong, need to sort gallery in class id order
     fc.weight.data = copy.deepcopy(gallery.reshape(n_classes, feat_dim))
     ce_criterion = nn.CrossEntropyLoss()
-    entropy_criterion = EntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
     replay_buffer = SampleBuffer(train_feat=train_feat)
     # pos_samples = torch.cat([gallery, query], dim=0)
-    pos_samples = gallery 
+    pos_samples = instance_gallery 
 
     # hyperparam
     n_steps = CLASSIFIER_UPDATE_STEPS
@@ -814,8 +815,7 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
 
     for step in range(n_steps):
         pos_sample = pos_samples
-        # cross-entropy loss 
-        predict = fc(gallery)
+        predict = fc(instance_gallery)
 
         # compute energy
         # negative sample
@@ -828,24 +828,22 @@ def jem_metric_class_type(gallery, query, support_label, test_label, shot, train
         # compute loss
         energy_loss = (pos_energy - neg_energy)
         ce_loss = ce_criterion(predict, support_label)
-        # entropy_loss = entropy_criterion(pos_out)
 
-        loss = ce_loss + beta * energy_loss # + entropy_loss
+        loss = ce_loss + beta * energy_loss
         loss.backward() 
 
-        # clip_grad(fc.parameters(), optimizer)
         optimizer.step() 
         fc.zero_grad() 
 
         replay_buffer.push(neg_samples, neg_id)
 
     query_predict = fc(query).argmax(dim=-1)
-    # acc = (query_predict == test_label)/test_label.sum()
     acc, _ = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
 
     return acc 
 
-def finetune_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
+
+def finetune_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N', train_feat=None):
     # compute normalization
     if norm_type == 'CL2N':
         gallery = gallery - train_mean
@@ -872,6 +870,7 @@ def finetune_metric_class_type(gallery, query, support_label, test_label, shot, 
         gallery_list = [(W[predict==i,i].unsqueeze(1)*query_aug[predict==i]).mean(0,keepdim=True) for i in predict.unique()]
         gallery = torch.cat(gallery_list,dim=0).numpy()
     else:
+        instance_gallery = copy.deepcopy(gallery)
         gallery = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1) # (5, 1, D)
 
     feat_dim = gallery.shape[-1]
@@ -891,39 +890,81 @@ def finetune_metric_class_type(gallery, query, support_label, test_label, shot, 
     test_label = [global2task[v] for v in test_label]
 
     # prepare for training linear
+    instance_gallery = torch.tensor(instance_gallery, device='cuda:0')
     gallery = torch.tensor(gallery, device='cuda:0')
     query = torch.tensor(query, device='cuda:0')
     support_label = torch.tensor(support_label, device='cuda:0')
     test_label = torch.tensor(test_label, device='cuda:0')
-    # TODO: Bias or not
+
     fc = nn.Linear(feat_dim, n_classes).to(gallery.device)
-    # init fc weight = prototype 
-    # FIXME: Current implementation is wrong, need to sort gallery in class id order
-    fc.weight.data = gallery.reshape(n_classes, feat_dim)
+    fc.weight.data = copy.deepcopy(gallery.reshape(n_classes, feat_dim))
     ce_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(fc.parameters())
 
     # hyperparam
-    n_steps = CLASSIFIER_UPDATE_STEPS 
+    n_steps = CLASSIFIER_UPDATE_STEPS
+    alpha = 1
+    beta = BETA_WEIGHT
 
     fc.train()
-    for step in range(n_steps):
-        # cross-entropy loss 
-        predict = fc(gallery)
-        ce_loss = ce_criterion(predict, support_label)
+    norm_kwargs = {'norm_type': norm_type} 
+    if norm_type == 'CL2N':
+        norm_kwargs['mean'] = torch.tensor(train_mean, device='cuda:0')
 
-        loss = ce_loss
+    for step in range(n_steps):
+        predict = fc(instance_gallery)
+
+        loss = ce_criterion(predict, support_label)
         loss.backward() 
 
-        # clip_grad(fc.parameters(), optimizer)
         optimizer.step() 
         fc.zero_grad() 
+
 
     query_predict = fc(query).argmax(dim=-1)
     # acc = (query_predict == test_label)/test_label.sum()
     acc, _ = get_accuracy(query_predict.cpu().numpy(), test_label.cpu().numpy())
 
     return acc 
+
+def distance_metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N', metric_type='cosine'):
+    if norm_type == 'CL2N':
+        gallery = gallery - train_mean
+        gallery = gallery / LA.norm(gallery, 2, 1)[:, None]
+        query = query - train_mean
+        query = query / LA.norm(query, 2, 1)[:, None]
+    elif norm_type == 'L2N':
+        gallery = gallery / LA.norm(gallery, 2, 1)[:, None]
+        query = query / LA.norm(query, 2, 1)[:, None]
+
+    if args.proto_rect:
+        eta = gallery.mean(0) - query.mean(0) # shift
+        query = query + eta[np.newaxis,:]
+        query_aug = np.concatenate((gallery, query),axis=0)
+        gallery_ = gallery.reshape(args.meta_val_way, shot, gallery.shape[-1]).mean(1)
+        gallery_ = torch.from_numpy(gallery_)
+        query_aug = torch.from_numpy(query_aug)
+        distance = get_metric('cosine')(gallery_, query_aug)
+        predict = torch.argmin(distance, dim=1)
+        cos_sim = F.cosine_similarity(query_aug[:, None, :], gallery_[None, :, :], dim=2)
+        cos_sim = 10 * cos_sim
+        W = F.softmax(cos_sim,dim=1)
+        gallery_list = [(W[predict==i,i].unsqueeze(1)*query_aug[predict==i]).mean(0,keepdim=True) for i in predict.unique()]
+        gallery = torch.cat(gallery_list,dim=0).numpy()
+    else:
+        gallery = gallery.reshape(args.meta_val_way, shot, gallery.shape[1]).mean(1)
+
+    support_label = support_label[::shot]
+
+    gallery = torch.tensor(gallery, device='cuda:0')
+    query = torch.tensor(query, device='cuda:0')
+    support_label = torch.tensor(support_label, device='cuda:0')
+    test_label = torch.tensor(test_label, device='cuda:0')
+    
+    prediction = metric_prediction(gallery, query, support_label, metric_type=metric_type)
+    acc, _ = get_accuracy(prediction.cpu().numpy(), test_label.cpu().numpy())
+
+    return acc
 
 def metric_class_type(gallery, query, support_label, test_label, shot, train_mean=None, norm_type='CL2N'):
     if norm_type == 'CL2N':
@@ -1064,7 +1105,6 @@ def do_extract_and_evaluate(model, log):
     print(
         'Meta Test: BEST\nfeature\tFT\tLAP\tJEM\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})\n{}\t{:.4f}({:.4f})\t{:.4f}({:.4f})\t{:.4f}({:.4f})'.format(
             'GVP ' + str(norm1), *accuracy_info_shot1_norm1, 'GVP ' + str(norm2), *accuracy_info_shot1_norm2, 'GVP ' + str(norm3), *accuracy_info_shot1_norm3))
-
 
 if __name__ == '__main__':
     main()
