@@ -47,14 +47,14 @@ class MLPNetwork(nn.Module):
         for i in range(n_layer):
             if i == 0:
                 layers.append(nn.Linear(inp_dim, hidden_dim))
-                layers.append(nn.ReLU())
+                layers.append(nn.LeakyReLU(0.2, inplace=True))
             elif i == (n_layer - 1):
                 # since the last layer of classifier is fed through a ReLU, we also add relu in the last layer
                 layers.append(nn.Linear(hidden_dim, out_dim))
-                layers.append(nn.ReLU())
+                layers.append(nn.ReLU(inplace=True))
             else:
                 layers.append(nn.Linear(hidden_dim, hidden_dim))
-                layers.append(nn.ReLU())
+                layers.append(nn.LeakyReLU(0.2, inplace=True))
         self.model = nn.Sequential(*layers)
 
     def forward(self, x):

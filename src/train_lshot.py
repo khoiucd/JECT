@@ -847,12 +847,12 @@ def vera_metric_class_type(gallery, query, support_label, test_label, shot, trai
                  'p_control': 0,
                  'n_control': 0,
                  'pg_control': 0.1,
-                 'energy_weight': 0.1,
+                 'energy_weight': 0.5,
                  'ent_weight': 0.0001,
                  'max_sigma': 0.3,
                  'min_sigma': 0.001,
                  'noise_dim': 128, 
-                 'post_lr': 3e-5,
+                 'post_lr': 0.001,
                  'norm_type': norm_type,
                  'train_mean': train_mean}
 
@@ -866,7 +866,7 @@ def vera_metric_class_type(gallery, query, support_label, test_label, shot, trai
 
     ce_criterion = nn.CrossEntropyLoss()
     e_optimizer = torch.optim.Adam(fc.parameters(), 0.001)
-    g_optimizer = torch.optim.Adam(generator.parameters(), 0.005)
+    g_optimizer = torch.optim.Adam(generator.parameters(), 0.001)
 
     fc.train()
     generator.train()
